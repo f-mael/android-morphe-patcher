@@ -44,51 +44,12 @@ jobs:
           distribution: 'zulu'
           java-version: '21'
 
-      - name: Download official binaries and patches
+      - name: Setup tools and patches
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
-          mkdir -p tools out
-
-          echo "=========================================================="
-          echo "==> 1. Descargando Morphe CLI..."
-          echo "=========================================================="
-          # morphe-cli redirige a morphe-desktop en GitHub
-          gh release download --repo MorpheApp/morphe-cli --pattern "*all.jar" --dir tools || \
-          gh release download --repo MorpheApp/morphe-desktop --pattern "*all.jar" --dir tools
-
-          mv tools/*all.jar tools/cli.jar
-          chmod +x tools/cli.jar
-
-          echo "=========================================================="
-          echo "==> 2. Descargando bundle de parches dh6k/morphe-patches..."
-          echo "=========================================================="
-          # dh6k/morphe-patches publica bundles de parches (.jar o .mpp)
-          if gh release download --repo dh6k/morphe-patches --pattern "*.jar" --dir tools 2>/dev/null; then
-            mv tools/*.jar tools/patches.jar
-          elif gh release download --repo dh6k/morphe-patches --pattern "*.mpp" --dir tools 2>/dev/null; then
-            mv tools/*.mpp tools/patches.jar
-          else
-            echo "Error: No se pudo obtener el bundle de parches de dh6k/morphe-patches" >&2
-            exit 1
-          fi
-
-          echo "=========================================================="
-          echo "==> 3. Verificando/descargando integrations APK..."
-          echo "=========================================================="
-          if gh release download --repo dh6k/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
-            mv tools/*.apk tools/integrations.apk
-            echo "Integrations APK descargado desde dh6k/morphe-patches."
-          elif gh release download --repo MorpheApp/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
-            mv tools/*.apk tools/integrations.apk
-            echo "Integrations APK descargado desde fallback MorpheApp/morphe-patches."
-          else
-            echo "Nota: No se encontró integrations APK independiente (las integraciones vienen incluidas en el bundle de parches)."
-          fi
-
-          echo "Herramientas preparadas en tools/:"
-          ls -la tools/
+          chmod +x scripts/setup-tools.sh
+          bash scripts/setup-tools.sh "dh6k/morphe-patches"
 
       - name: Resolve and download Brave APK
         env:
@@ -176,7 +137,7 @@ jobs:
       - name: Patch APK with Morphe CLI
         run: |
           set -e
-          OUTPUT_APK="out/brave-${{ inputs.brave_variant }}-${{ inputs.architecture }}-patched.apk"
+          OUTPUT_APK="brave-${{ inputs.brave_variant }}-${{ inputs.architecture }}-patched.apk"
 
           # Evaluar compatibilidad del flag --merge en el CLI y presencia de integrations.apk
           MERGE_ARGS=()
@@ -185,7 +146,7 @@ jobs:
               echo "CLI soporta opción --merge; adjuntando tools/integrations.apk..."
               MERGE_ARGS=("--merge" "tools/integrations.apk")
             else
-              echo "tools/integrations.apk disponible pero Morphe CLI empaqueta las integraciones internamente; omitiendo --merge para compatibilidad."
+              echo "tools/integrations.apk disponible pero Morphe CLI empaqueta las integraciones internamente; omitiendo --merge."
             fi
           fi
 
@@ -207,6 +168,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: brave-patched-${{ inputs.brave_variant }}-${{ inputs.architecture }}
-          path: out/*.apk
+          path: brave-*-patched.apk
           retention-days: 7
           if-no-files-found: error
