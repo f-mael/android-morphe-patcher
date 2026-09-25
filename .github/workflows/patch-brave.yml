@@ -29,10 +29,10 @@ on:
 
 jobs:
   patch:
-    name: Patch Brave APK (${{ inputs.brave_variant }} - ${{ inputs.architecture }})
+    name: Patch & Release Brave (${{ inputs.brave_variant }} - ${{ inputs.architecture }})
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -44,14 +44,54 @@ jobs:
           distribution: 'zulu'
           java-version: '21'
 
-      - name: Setup tools and patches
+      - name: Download Morphe CLI and dh6k patches
+        id: tools
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          chmod +x scripts/setup-tools.sh
-          bash scripts/setup-tools.sh "dh6k/morphe-patches"
+          set -e
+          mkdir -p tools
+
+          echo "=========================================================="
+          echo "==> 1. Descargando Morphe CLI..."
+          echo "=========================================================="
+          gh release download --repo MorpheApp/morphe-cli --pattern "*all.jar" --dir tools 2>/dev/null || \
+          gh release download --repo MorpheApp/morphe-desktop --pattern "*all.jar" --dir tools
+          mv tools/*all.jar tools/cli.jar
+          chmod +x tools/cli.jar
+
+          echo "=========================================================="
+          echo "==> 2. Descargando bundle de parches dh6k/morphe-patches..."
+          echo "=========================================================="
+          PATCHES_TAG=$(gh release view --repo dh6k/morphe-patches --json tagName --jq .tagName 2>/dev/null || echo "latest")
+          echo "patches_version=$PATCHES_TAG" >> "$GITHUB_OUTPUT"
+
+          if gh release download --repo dh6k/morphe-patches --pattern "*.jar" --dir tools 2>/dev/null; then
+            mv tools/*.jar tools/patches.jar
+          elif gh release download --repo dh6k/morphe-patches --pattern "*.mpp" --dir tools 2>/dev/null; then
+            mv tools/*.mpp tools/patches.jar
+          else
+            echo "Error: No se pudo obtener el bundle de parches de dh6k/morphe-patches" >&2
+            exit 1
+          fi
+
+          echo "=========================================================="
+          echo "==> 3. Verificando/descargando integrations APK..."
+          echo "=========================================================="
+          if gh release download --repo dh6k/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
+            mv tools/*.apk tools/integrations.apk
+            echo "Integrations APK descargado desde dh6k/morphe-patches."
+          elif gh release download --repo MorpheApp/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
+            mv tools/*.apk tools/integrations.apk
+            echo "Integrations APK descargado desde fallback MorpheApp/morphe-patches."
+          else
+            echo "Nota: Integraciones incluidas dentro del bundle de parches."
+          fi
+
+          ls -lh tools/
 
       - name: Resolve and download Brave APK
+        id: brave
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRAVE_VARIANT: ${{ inputs.brave_variant }}
@@ -66,6 +106,7 @@ jobs:
             echo "    $APK_URL"
             echo "=========================================================="
             curl -fL -o input.apk "$APK_URL"
+            BRAVE_TAG="manual-url"
           else
             echo "=========================================================="
             echo "==> Resolviendo release oficial de brave/brave-browser..."
@@ -82,29 +123,25 @@ jobs:
                 PREFIX="Nightly "
                 ;;
               *)
-                echo "Error: Variante no reconocida '$BRAVE_VARIANT'" >&2
+                echo "Error: Variante desconocida '$BRAVE_VARIANT'" >&2
                 exit 1
                 ;;
             esac
 
-            echo "Buscando release con prefijo '$PREFIX' y paquetes APK disponibles..."
-
-            # Consultar los últimos releases y filtrar el primero que coincida con la variante y contenga APKs
+            echo "Buscando release con prefijo '$PREFIX' y paquetes APK..."
             RELEASE_TAG=$(gh api "repos/brave/brave-browser/releases?per_page=30" | jq -r --arg prefix "$PREFIX" '
               map(select((.name | startswith($prefix)) and (.assets | any(.name | endswith(".apk"))))) | first | .tag_name
             ')
 
             if [ -z "$RELEASE_TAG" ] || [ "$RELEASE_TAG" = "null" ]; then
-              echo "Error: No se encontró una release válida con APKs para la variante '$BRAVE_VARIANT'" >&2
+              echo "Error: No se encontró release con APKs para la variante '$BRAVE_VARIANT'" >&2
               exit 1
             fi
 
             echo "Release seleccionada: $RELEASE_TAG"
+            BRAVE_TAG="$RELEASE_TAG"
 
-            # Identificar el activo APK correspondiente a la arquitectura seleccionada
-            # armv8     -> arm64 / Bravearm64Universal.apk / arm64.apk
-            # armv7     -> monoarm / [0-9]-arm.apk / arm.apk (excluyendo arm64)
-            # universal -> universal.apk / Bravearm64Universal.apk
+            # Identificar el activo APK para la arquitectura
             ASSET_NAME=$(gh api "repos/brave/brave-browser/releases/tags/$RELEASE_TAG" | jq -r --arg arch "$ARCH" '
               .assets | map(select(.name | endswith(".apk"))) as $apks |
               (
@@ -121,34 +158,122 @@ jobs:
             ')
 
             if [ -z "$ASSET_NAME" ] || [ "$ASSET_NAME" = "null" ]; then
-              echo "Error: No se pudo resolver el nombre del activo para la arquitectura '$ARCH'" >&2
+              echo "Error: No se pudo resolver el nombre del activo para '$ARCH'" >&2
               exit 1
             fi
 
-            echo "Descargando activo '$ASSET_NAME' desde la release '$RELEASE_TAG'..."
+            echo "Descargando '$ASSET_NAME' de la release '$RELEASE_TAG'..."
             gh release download "$RELEASE_TAG" --repo brave/brave-browser --pattern "$ASSET_NAME" --output input.apk
           fi
 
-          echo "=========================================================="
-          echo "==> APK de entrada obtenido con éxito:"
+          echo "brave_version=$BRAVE_TAG" >> "$GITHUB_OUTPUT"
           ls -lh input.apk
-          echo "=========================================================="
 
-      - name: Patch APK with Morphe CLI
+      - name: Patch and Sign APK
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
           KEYSTORE_ENTRY_PASSWORD: ${{ secrets.KEYSTORE_ENTRY_PASSWORD }}
         run: |
-          chmod +x scripts/patch-runner.sh
+          set -e
           OUTPUT_APK="brave-${{ inputs.brave_variant }}-${{ inputs.architecture }}-patched.apk"
-          bash scripts/patch-runner.sh input.apk "$OUTPUT_APK"
+          KEYSTORE_ARGS=()
 
-      - name: Upload patched APK artifact
-        uses: actions/upload-artifact@v4
+          # Decodificar keystore personalizado si está presente en secretos
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            echo "==> Configurando keystore personalizado desde secretos..."
+            mkdir -p certs
+            echo "$KEYSTORE_BASE64" | base64 -d > certs/signing.keystore
+            KEYSTORE_ARGS=(
+              --keystore certs/signing.keystore
+              --keystore-password "${KEYSTORE_PASSWORD:-}"
+              --keystore-entry-alias "${KEYSTORE_ALIAS:-}"
+              --keystore-entry-password "${KEYSTORE_ENTRY_PASSWORD:-${KEYSTORE_PASSWORD:-}}"
+            )
+          else
+            echo "==> No se detectó KEYSTORE_BASE64. Morphe CLI usará el keystore integrado por defecto."
+          fi
+
+          # Evaluar compatibilidad del flag --merge en el CLI y presencia de integrations.apk
+          MERGE_ARGS=()
+          if [ -f "tools/integrations.apk" ]; then
+            if java -jar tools/cli.jar patch --help 2>&1 | grep -q -- "--merge"; then
+              echo "CLI soporta opción --merge; adjuntando tools/integrations.apk..."
+              MERGE_ARGS=("--merge" "tools/integrations.apk")
+            else
+              echo "tools/integrations.apk disponible pero Morphe CLI empaqueta las integraciones internamente; omitiendo --merge."
+            fi
+          fi
+
+          echo "=========================================================="
+          echo "==> Ejecutando parcheo con Morphe CLI..."
+          echo "=========================================================="
+          java -jar tools/cli.jar patch \
+            --patches tools/patches.jar \
+            ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
+            ${KEYSTORE_ARGS[@]+"${KEYSTORE_ARGS[@]}"} \
+            --out "$OUTPUT_APK" \
+            input.apk
+
+          # Limpieza de certificados de seguridad
+          rm -rf certs
+
+          echo "=========================================================="
+          echo "==> APK parcheado exitosamente:"
+          ls -lh "$OUTPUT_APK"
+          echo "=========================================================="
+
+      - name: Generate Release Notes and Metadata
+        id: release_meta
+        run: |
+          set -e
+          OUTPUT_APK="brave-${{ inputs.brave_variant }}-${{ inputs.architecture }}-patched.apk"
+          SHA256_HASH=$(sha256sum "$OUTPUT_APK" | awk '{print $1}')
+          BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          TAG_NAME="brave-${{ inputs.brave_variant }}-${{ inputs.architecture }}-v$(date +'%Y.%m.%d-%H%M')"
+
+          cat <<EOF > release_notes.md
+# 🦁 Brave Browser Parcheado (dh6k)
+
+Compilación automatizada de **Brave Browser** para Android parcheado con **Morphe CLI** y el catálogo de parches de **[dh6k/morphe-patches](https://github.com/dh6k/morphe-patches)**.
+
+---
+
+### 📋 Información de la Compilación
+| Parámetro | Detalle |
+| :--- | :--- |
+| **Variante** | \`${{ inputs.brave_variant }}\` |
+| **Arquitectura** | \`${{ inputs.architecture }}\` |
+| **Versión Base de Brave** | \`${{ steps.brave.outputs.brave_version }}\` |
+| **Versión Parches dh6k** | \`${{ steps.tools.outputs.patches_version }}\` |
+| **Fecha de Compilación** | \`${BUILD_DATE}\` |
+
+---
+
+### 🔒 Integridad del Archivo (Checksum SHA-256)
+\`\`\`text
+${SHA256_HASH}  ${OUTPUT_APK}
+\`\`\`
+
+---
+
+### 📲 Instrucciones de Instalación
+1. Descarga el archivo \`${OUTPUT_APK}\` adjunto en los **Assets** de esta release.
+2. Si tienes instalada la versión oficial de Google Play Store, **desinstálala antes** de instalar esta versión (para evitar conflictos de firma).
+3. Habilita la opción **Permitir desde esta fuente** si Android lo solicita y procede con la instalación.
+EOF
+
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "output_apk=$OUTPUT_APK" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: brave-patched-${{ inputs.brave_variant }}-${{ inputs.architecture }}
-          path: brave-*-patched.apk
-          retention-days: 7
-          if-no-files-found: error
+          tag_name: ${{ steps.release_meta.outputs.tag_name }}
+          name: "Brave ${{ inputs.brave_variant }} (${{ inputs.architecture }})"
+          body_path: release_notes.md
+          files: ${{ steps.release_meta.outputs.output_apk }}
+          prerelease: ${{ inputs.brave_variant != 'Stable' }}

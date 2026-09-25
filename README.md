@@ -1,176 +1,72 @@
-# Multi-App Android Morphe Patcher
+# 🦁 Brave Browser Android Patcher
 
-Repositorio modular para la automatización del proceso de compilación y parcheo de aplicaciones de **Android** utilizando **Morphe CLI** a través de **GitHub Actions**. La arquitectura base está desacoplada para permitir la incorporación de múltiples aplicaciones (Brave Browser, YouTube, Reddit, etc.) reutilizando scripts y herramientas comunes.
-
----
-
-## 🏗️ Arquitectura Modular
-
-El repositorio está estructurado para separar la configuración de herramientas de la lógica de cada aplicación:
-
-```text
-.
-├── .github/
-│   └── workflows/
-│       └── patch-brave.yml      # Workflow específico para Brave Browser
-├── scripts/
-│   └── setup-tools.sh           # Script reusable para descargar Morphe CLI, parches e integraciones
-├── .gitignore
-└── README.md
-```
-
-### Script Base: `scripts/setup-tools.sh`
-Permite descargar e inicializar en el directorio `tools/`:
-- **Morphe CLI** (`MorpheApp/morphe-cli` -> `tools/cli.jar`).
-- **Bundle de parches** desde el repositorio indicado por parámetro (por defecto `dh6k/morphe-patches` -> `tools/patches.jar`).
-- **APK de integraciones** (`*integrations*.apk` -> `tools/integrations.apk`) con fallback automático a `MorpheApp/morphe-patches`.
+Automatización del parcheo y compilación de **Brave Browser para Android** utilizando **Morphe CLI** y los parches de **[dh6k/morphe-patches](https://github.com/dh6k/morphe-patches)** con publicación directa en **GitHub Releases**.
 
 ---
 
-## 📌 Objetivo Actual: Brave Browser
+## ⚡ Características
 
-El primer objetivo implementado es el parcheo de **Brave Browser** con el catálogo de **[dh6k/morphe-patches](https://github.com/dh6k/morphe-patches)**.
-
-### Parches de dh6k
-- Desbloqueo de opciones internas avanzadas y **Brave Origin**.
-- Fondos de pantalla personalizados en la nueva pestaña (New Tab Page).
-- Eliminación de promociones y telemetría no deseada.
-- Optimizaciones de rendimiento y estética.
-
-### Flujo de Ejecución (GitHub Actions)
-
-```mermaid
-flowchart TD
-    A[Disparador Manual: workflow_dispatch] --> B[Entorno Runner: ubuntu-latest]
-    B --> C[Setup Java 21 Zulu]
-    C --> D[Ejecutar scripts/setup-tools.sh]
-    D --> E{¿Se especificó apk_url?}
-    E -- Sí --> F[Descarga directa con cURL]
-    E -- No --> G[Consultar API GitHub: brave/brave-browser]
-    G --> H[Filtrar por canal: Stable, Beta o Nightly]
-    H --> I[Seleccionar APK según Arquitectura: armv8, armv7 o universal]
-    I --> J[Descargar APK oficial con gh release]
-    F --> K[Ejecutar Morphe CLI Patcher]
-    J --> K
-    K --> L[Generar brave-variant-arch-patched.apk]
-    L --> M[Subir Artefacto a GitHub Actions - 7 días]
-```
+- **Descarga automática**: Obtiene la versión más reciente del APK oficial de Brave desde `brave/brave-browser` en GitHub según el canal y arquitectura elegidos.
+- **Parches de dh6k**: Desbloqueo de opciones avanzadas y **Brave Origin**, fondos de pantalla personalizados en la nueva pestaña (NTP) y limpieza de telemetría.
+- **Firma personalizable**: Soporte para keystore personalizado vía GitHub Secrets para mantener la misma firma entre actualizaciones, o uso del keystore de debug integrado por defecto.
+- **Publicación directa**: Genera una release en GitHub con notas detalladas, versión de parches, fecha y hash SHA-256 del APK listo para instalar.
 
 ---
 
-## ⚙️ Requisitos y Dependencias
-
-### En GitHub Actions (Recomendado)
-- **Cuenta de GitHub** con acceso al repositorio (Fork o repositorio propio).
-- Ejecución en runners estándar gratuitos `ubuntu-latest`.
-- Permiso `contents: read` con `GITHUB_TOKEN` integrado.
-
-### En Entorno Local (Opcional)
-- **JDK 21+** (ej. Azul Zulu OpenJDK 21).
-- **GitHub CLI (`gh`)**, **cURL** y **jq**.
-- Bash (Linux, macOS o WSL/Git Bash en Windows).
-
----
-
-## 🚀 Guía de Ejecución: Workflow de Brave (`workflow_dispatch`)
+## 🚀 Cómo Ejecutar el Workflow
 
 1. Ve a la pestaña **Actions** en tu repositorio de GitHub.
-2. En la barra lateral izquierda, selecciona el workflow **Patch Brave Browser**.
-3. Haz clic en **Run workflow** (botón desplegable a la derecha).
-4. Configura los parámetros deseados:
+2. Selecciona el workflow **Patch Brave Browser** en la columna izquierda.
+3. Haz clic en el botón desplegable **Run workflow** a la derecha.
+4. Elige los parámetros deseados:
 
-| Parámetro | Tipo | Opciones / Formato | Default | Descripción |
+| Input | Tipo | Opciones | Default | Descripción |
 | :--- | :--- | :--- | :--- | :--- |
-| `brave_variant` | `choice` | `Stable`, `Beta`, `Nightly` | `Stable` | Canal de distribución oficial de Brave Browser. |
-| `architecture` | `choice` | `armv8`, `armv7`, `universal` | `armv8` | Arquitectura del procesador del dispositivo de destino. |
-| `apk_url` | `string` | URL HTTP/HTTPS directa | *(vacío)* | Enlace manual a un APK específico (anula la búsqueda automática). |
+| `brave_variant` | `choice` | `Stable`, `Beta`, `Nightly` | `Stable` | Canal oficial de Brave Browser. Determina si la release es final o pre-release. |
+| `architecture` | `choice` | `armv8`, `armv7`, `universal` | `armv8` | Arquitectura de CPU del dispositivo Android. |
+| `apk_url` | `string` | URL HTTP/HTTPS directa | *(vacío)* | Opcional. Permite forzar la descarga de un APK específico omitiendo la búsqueda automática. |
 
-5. Pulsa en **Run workflow** para iniciar el trabajo.
+5. Pulsa en **Run workflow**. El proceso toma entre 2 y 4 minutos.
 
-### Variantes y Arquitecturas
+### Selección de Arquitectura
 - **`armv8` (arm64-v8a)**: **Recomendado**. Para teléfonos y tablets modernos de 64 bits (descarga `Bravearm64Universal.apk`).
-- **`armv7` (armeabi-v7a)**: Para dispositivos de 32 bits o Android legado (descarga `BraveMonoarm.apk`).
-- **`universal`**: APK universal multiarquitectura.
+- **`armv7` (armeabi-v7a)**: Para teléfonos antiguos de 32 bits (descarga `BraveMonoarm.apk`).
+- **`universal`**: Paquete multiarquitectura.
 
 ---
 
-## 📥 Descarga del Artefacto Generado
+## 📥 Descarga del APK Parcheado
 
-1. En la pestaña **Actions**, entra en la ejecución completada (marcada en verde ✅).
-2. Desplázate a la sección **Artifacts** al final del resumen.
-3. Descarga el archivo `.zip` del artefacto denominado:
+Una vez finalizada la ejecución:
+
+1. Ve a la pestaña **Releases** en tu repositorio de GitHub (o al enlace directo en la barra lateral derecha).
+2. Localiza la última versión publicada, nombrada:
    ```text
-   brave-patched-<Variante>-<Arquitectura>
+   Brave <Variante> (<Arquitectura>)
    ```
-4. Descomprime el archivo `.zip` para extraer el APK `brave-<Variante>-<Arquitectura>-patched.apk`.
+3. En la sección **Assets**, descarga directamente el archivo `.apk` parcheado:
+   ```text
+   brave-<Variante>-<Arquitectura>-patched.apk
+   ```
+4. Comprueba el hash SHA-256 incluido en la descripción de la release si deseas validar la integridad del archivo.
+
+---
+
+## 🔑 Firma Personalizada con Keystore (Opcional)
+
+Si deseas actualizar la app en tu teléfono sin necesidad de desinstalarla en cada nueva versión, puedes configurar tu propio almacén de claves en **Settings > Secrets and variables > Actions**:
+
+- `KEYSTORE_BASE64`: Contenido de tu archivo `.keystore` codificado en base64 (`base64 -w 0 mi_llave.keystore`).
+- `KEYSTORE_PASSWORD`: Contraseña del keystore.
+- `KEYSTORE_ALIAS`: Alias de la clave privada.
+- `KEYSTORE_ENTRY_PASSWORD`: Contraseña del alias (si difiere de `KEYSTORE_PASSWORD`).
 
 > [!NOTE]
-> Los artefactos se conservan durante **7 días** en GitHub Actions antes de ser purgados automáticamente.
-
-> [!WARNING]
-> Debido a que el APK se firma con una clave generada en el parcheo, debes **desinstalar la versión oficial de Brave de Play Store** antes de instalar el APK parcheado para evitar conflicto de firmas.
+> Si no configuras estos secretos, Morphe CLI firmará el APK automáticamente con su keystore integrado por defecto.
 
 ---
 
-## ➕ Cómo Agregar Nuevas Aplicaciones (YouTube, Reddit, etc.)
+## 📲 Instalación en Android
 
-Gracias al diseño modular, agregar soporte para otra aplicación solo requiere crear un nuevo archivo de workflow en `.github/workflows/` (por ejemplo `.github/workflows/patch-youtube.yml`) reutilizando `scripts/setup-tools.sh`.
-
-### Plantilla de Ejemplo: `.github/workflows/patch-<app>.yml`
-
-```yaml
-name: Patch <App>
-
-on:
-  workflow_dispatch:
-    inputs:
-      apk_url:
-        description: 'URL directa al APK base de <App>'
-        required: true
-        type: string
-      patches_repo:
-        description: 'Repositorio de parches a utilizar'
-        required: false
-        type: string
-        default: 'MorpheApp/morphe-patches'
-
-jobs:
-  patch:
-    name: Patch <App> APK
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Java 21 (Zulu)
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'zulu'
-          java-version: '21'
-
-      # Reutilización del script modular pasando el repositorio deseado
-      - name: Setup tools and patches
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          chmod +x scripts/setup-tools.sh
-          bash scripts/setup-tools.sh "${{ inputs.patches_repo }}"
-
-      - name: Download input APK
-        run: |
-          curl -fL -o input.apk "${{ inputs.apk_url }}"
-
-      - name: Patch APK with Morphe CLI
-        run: |
-          java -jar tools/cli.jar patch \
-            --patches tools/patches.jar \
-            --out "<app>-patched.apk" \
-            input.apk
-
-      - name: Upload patched APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: <app>-patched
-          path: <app>-patched.apk
-          retention-days: 7
-```
+> [!WARNING]
+> La primera vez que instales esta versión parcheada, **debes desinstalar primero la versión oficial de Brave de Google Play Store** (debido a que las claves de firma criptográfica son diferentes). Recuerda respaldar tus marcadores y códigos de Brave Sync previamente.
