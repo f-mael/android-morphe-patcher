@@ -1,0 +1,212 @@
+name: Patch Brave Browser
+
+on:
+  workflow_dispatch:
+    inputs:
+      brave_variant:
+        description: 'Variante de Brave Browser'
+        required: true
+        type: choice
+        options:
+          - Stable
+          - Beta
+          - Nightly
+        default: 'Stable'
+      architecture:
+        description: 'Arquitectura de destino'
+        required: true
+        type: choice
+        options:
+          - armv8
+          - armv7
+          - universal
+        default: 'armv8'
+      apk_url:
+        description: 'URL directa opcional al APK de Brave (deja vacío para auto-detectar de releases)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  patch:
+    name: Patch Brave APK (${{ inputs.brave_variant }} - ${{ inputs.architecture }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 21 (Zulu)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      - name: Download official binaries and patches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          mkdir -p tools out
+
+          echo "=========================================================="
+          echo "==> 1. Descargando Morphe CLI..."
+          echo "=========================================================="
+          # morphe-cli redirige a morphe-desktop en GitHub
+          gh release download --repo MorpheApp/morphe-cli --pattern "*all.jar" --dir tools || \
+          gh release download --repo MorpheApp/morphe-desktop --pattern "*all.jar" --dir tools
+
+          mv tools/*all.jar tools/cli.jar
+          chmod +x tools/cli.jar
+
+          echo "=========================================================="
+          echo "==> 2. Descargando bundle de parches dh6k/morphe-patches..."
+          echo "=========================================================="
+          # dh6k/morphe-patches publica bundles de parches (.jar o .mpp)
+          if gh release download --repo dh6k/morphe-patches --pattern "*.jar" --dir tools 2>/dev/null; then
+            mv tools/*.jar tools/patches.jar
+          elif gh release download --repo dh6k/morphe-patches --pattern "*.mpp" --dir tools 2>/dev/null; then
+            mv tools/*.mpp tools/patches.jar
+          else
+            echo "Error: No se pudo obtener el bundle de parches de dh6k/morphe-patches" >&2
+            exit 1
+          fi
+
+          echo "=========================================================="
+          echo "==> 3. Verificando/descargando integrations APK..."
+          echo "=========================================================="
+          if gh release download --repo dh6k/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
+            mv tools/*.apk tools/integrations.apk
+            echo "Integrations APK descargado desde dh6k/morphe-patches."
+          elif gh release download --repo MorpheApp/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
+            mv tools/*.apk tools/integrations.apk
+            echo "Integrations APK descargado desde fallback MorpheApp/morphe-patches."
+          else
+            echo "Nota: No se encontró integrations APK independiente (las integraciones vienen incluidas en el bundle de parches)."
+          fi
+
+          echo "Herramientas preparadas en tools/:"
+          ls -la tools/
+
+      - name: Resolve and download Brave APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRAVE_VARIANT: ${{ inputs.brave_variant }}
+          ARCH: ${{ inputs.architecture }}
+          APK_URL: ${{ inputs.apk_url }}
+        run: |
+          set -e
+
+          if [ -n "$APK_URL" ]; then
+            echo "=========================================================="
+            echo "==> Descargando APK desde URL directa provista:"
+            echo "    $APK_URL"
+            echo "=========================================================="
+            curl -fL -o input.apk "$APK_URL"
+          else
+            echo "=========================================================="
+            echo "==> Resolviendo release oficial de brave/brave-browser..."
+            echo "=========================================================="
+
+            case "$BRAVE_VARIANT" in
+              "Stable")
+                PREFIX="Release "
+                ;;
+              "Beta")
+                PREFIX="Beta "
+                ;;
+              "Nightly")
+                PREFIX="Nightly "
+                ;;
+              *)
+                echo "Error: Variante no reconocida '$BRAVE_VARIANT'" >&2
+                exit 1
+                ;;
+            esac
+
+            echo "Buscando release con prefijo '$PREFIX' y paquetes APK disponibles..."
+
+            # Consultar los últimos releases y filtrar el primero que coincida con la variante y contenga APKs
+            RELEASE_TAG=$(gh api "repos/brave/brave-browser/releases?per_page=30" | jq -r --arg prefix "$PREFIX" '
+              map(select((.name | startswith($prefix)) and (.assets | any(.name | endswith(".apk"))))) | first | .tag_name
+            ')
+
+            if [ -z "$RELEASE_TAG" ] || [ "$RELEASE_TAG" = "null" ]; then
+              echo "Error: No se encontró una release válida con APKs para la variante '$BRAVE_VARIANT'" >&2
+              exit 1
+            fi
+
+            echo "Release seleccionada: $RELEASE_TAG"
+
+            # Identificar el activo APK correspondiente a la arquitectura seleccionada
+            # armv8     -> arm64 / Bravearm64Universal.apk / arm64.apk
+            # armv7     -> monoarm / [0-9]-arm.apk / arm.apk (excluyendo arm64)
+            # universal -> universal.apk / Bravearm64Universal.apk
+            ASSET_NAME=$(gh api "repos/brave/brave-browser/releases/tags/$RELEASE_TAG" | jq -r --arg arch "$ARCH" '
+              .assets | map(select(.name | endswith(".apk"))) as $apks |
+              (
+                if $arch == "armv8" then
+                  ($apks | map(select(.name | test("arm64.*universal|arm64"; "i"))) | first | .name)
+                elif $arch == "armv7" then
+                  ($apks | map(select((.name | test("monoarm|[0-9]-arm|arm"; "i")) and (.name | test("arm64"; "i") | not))) | first | .name)
+                elif $arch == "universal" then
+                  ($apks | map(select(.name | test("universal"; "i"))) | first | .name)
+                else
+                  empty
+                end
+              ) // ($apks | first | .name)
+            ')
+
+            if [ -z "$ASSET_NAME" ] || [ "$ASSET_NAME" = "null" ]; then
+              echo "Error: No se pudo resolver el nombre del activo para la arquitectura '$ARCH'" >&2
+              exit 1
+            fi
+
+            echo "Descargando activo '$ASSET_NAME' desde la release '$RELEASE_TAG'..."
+            gh release download "$RELEASE_TAG" --repo brave/brave-browser --pattern "$ASSET_NAME" --output input.apk
+          fi
+
+          echo "=========================================================="
+          echo "==> APK de entrada obtenido con éxito:"
+          ls -lh input.apk
+          echo "=========================================================="
+
+      - name: Patch APK with Morphe CLI
+        run: |
+          set -e
+          OUTPUT_APK="out/brave-${{ inputs.brave_variant }}-${{ inputs.architecture }}-patched.apk"
+
+          # Evaluar compatibilidad del flag --merge en el CLI y presencia de integrations.apk
+          MERGE_ARGS=()
+          if [ -f "tools/integrations.apk" ]; then
+            if java -jar tools/cli.jar patch --help 2>&1 | grep -q -- "--merge"; then
+              echo "CLI soporta opción --merge; adjuntando tools/integrations.apk..."
+              MERGE_ARGS=("--merge" "tools/integrations.apk")
+            else
+              echo "tools/integrations.apk disponible pero Morphe CLI empaqueta las integraciones internamente; omitiendo --merge para compatibilidad."
+            fi
+          fi
+
+          echo "=========================================================="
+          echo "==> Ejecutando parcheo con Morphe CLI..."
+          echo "=========================================================="
+          java -jar tools/cli.jar patch \
+            --patches tools/patches.jar \
+            "${MERGE_ARGS[@]}" \
+            --out "$OUTPUT_APK" \
+            input.apk
+
+          echo "=========================================================="
+          echo "==> APK parcheado exitosamente:"
+          ls -lh "$OUTPUT_APK"
+          echo "=========================================================="
+
+      - name: Upload patched APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: brave-patched-${{ inputs.brave_variant }}-${{ inputs.architecture }}
+          path: out/*.apk
+          retention-days: 7
+          if-no-files-found: error
