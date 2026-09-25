@@ -135,34 +135,15 @@ jobs:
           echo "=========================================================="
 
       - name: Patch APK with Morphe CLI
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+          KEYSTORE_ENTRY_PASSWORD: ${{ secrets.KEYSTORE_ENTRY_PASSWORD }}
         run: |
-          set -e
+          chmod +x scripts/patch-runner.sh
           OUTPUT_APK="brave-${{ inputs.brave_variant }}-${{ inputs.architecture }}-patched.apk"
-
-          # Evaluar compatibilidad del flag --merge en el CLI y presencia de integrations.apk
-          MERGE_ARGS=()
-          if [ -f "tools/integrations.apk" ]; then
-            if java -jar tools/cli.jar patch --help 2>&1 | grep -q -- "--merge"; then
-              echo "CLI soporta opción --merge; adjuntando tools/integrations.apk..."
-              MERGE_ARGS=("--merge" "tools/integrations.apk")
-            else
-              echo "tools/integrations.apk disponible pero Morphe CLI empaqueta las integraciones internamente; omitiendo --merge."
-            fi
-          fi
-
-          echo "=========================================================="
-          echo "==> Ejecutando parcheo con Morphe CLI..."
-          echo "=========================================================="
-          java -jar tools/cli.jar patch \
-            --patches tools/patches.jar \
-            "${MERGE_ARGS[@]}" \
-            --out "$OUTPUT_APK" \
-            input.apk
-
-          echo "=========================================================="
-          echo "==> APK parcheado exitosamente:"
-          ls -lh "$OUTPUT_APK"
-          echo "=========================================================="
+          bash scripts/patch-runner.sh input.apk "$OUTPUT_APK"
 
       - name: Upload patched APK artifact
         uses: actions/upload-artifact@v4
