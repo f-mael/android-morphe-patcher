@@ -233,36 +233,36 @@ jobs:
           BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
           TAG_NAME="brave-${{ inputs.brave_variant }}-${{ inputs.architecture }}-v$(date +'%Y.%m.%d-%H%M')"
 
-          cat <<EOF > release_notes.md
-# 🦁 Brave Browser Parcheado (dh6k)
-
-Compilación automatizada de **Brave Browser** para Android parcheado con **Morphe CLI** y el catálogo de parches de **[dh6k/morphe-patches](https://github.com/dh6k/morphe-patches)**.
-
----
-
-### 📋 Información de la Compilación
-| Parámetro | Detalle |
-| :--- | :--- |
-| **Variante** | \`${{ inputs.brave_variant }}\` |
-| **Arquitectura** | \`${{ inputs.architecture }}\` |
-| **Versión Base de Brave** | \`${{ steps.brave.outputs.brave_version }}\` |
-| **Versión Parches dh6k** | \`${{ steps.tools.outputs.patches_version }}\` |
-| **Fecha de Compilación** | \`${BUILD_DATE}\` |
-
----
-
-### 🔒 Integridad del Archivo (Checksum SHA-256)
-\`\`\`text
-${SHA256_HASH}  ${OUTPUT_APK}
-\`\`\`
-
----
-
-### 📲 Instrucciones de Instalación
-1. Descarga el archivo \`${OUTPUT_APK}\` adjunto en los **Assets** de esta release.
-2. Si tienes instalada la versión oficial de Google Play Store, **desinstálala antes** de instalar esta versión (para evitar conflictos de firma).
-3. Habilita la opción **Permitir desde esta fuente** si Android lo solicita y procede con la instalación.
-EOF
+          {
+            echo "# 🦁 Brave Browser Parcheado (dh6k)"
+            echo ""
+            echo "Compilación automatizada de **Brave Browser** para Android parcheado con **Morphe CLI** y el catálogo de parches de **[dh6k/morphe-patches](https://github.com/dh6k/morphe-patches)**."
+            echo ""
+            echo "---"
+            echo ""
+            echo "### 📋 Información de la Compilación"
+            echo "| Parámetro | Detalle |"
+            echo "| :--- | :--- |"
+            echo "| **Variante** | \`${{ inputs.brave_variant }}\` |"
+            echo "| **Arquitectura** | \`${{ inputs.architecture }}\` |"
+            echo "| **Versión Base de Brave** | \`${{ steps.brave.outputs.brave_version }}\` |"
+            echo "| **Versión Parches dh6k** | \`${{ steps.tools.outputs.patches_version }}\` |"
+            echo "| **Fecha de Compilación** | \`${BUILD_DATE}\` |"
+            echo ""
+            echo "---"
+            echo ""
+            echo "### 🔒 Integridad del Archivo (Checksum SHA-256)"
+            echo '```text'
+            echo "${SHA256_HASH}  ${OUTPUT_APK}"
+            echo '```'
+            echo ""
+            echo "---"
+            echo ""
+            echo "### 📲 Instrucciones de Instalación"
+            echo "1. Descarga el archivo \`${OUTPUT_APK}\` adjunto en los **Assets** de esta release."
+            echo "2. Si tienes instalada la versión oficial de Google Play Store, **desinstálala antes** de instalar esta versión (para evitar conflictos de firma)."
+            echo "3. Habilita la opción **Permitir desde esta fuente** si Android lo solicita y procede con la instalación."
+          } > release_notes.md
 
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           echo "output_apk=$OUTPUT_APK" >> "$GITHUB_OUTPUT"
