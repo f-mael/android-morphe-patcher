@@ -1,6 +1,8 @@
 name: Patch Brave Browser
 
-on:
+'on':
+  schedule:
+    - cron: '0 */12 * * *'
   workflow_dispatch:
     inputs:
       brave_variant:
@@ -27,12 +29,107 @@ on:
         type: string
         default: ''
 
+permissions:
+  contents: write
+
 jobs:
+  check:
+    name: Check Updates & Resolve Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.resolve.outputs.should_run }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check updates and resolve build matrix
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VARIANT: ${{ inputs.brave_variant }}
+          INPUT_ARCH: ${{ inputs.architecture }}
+          INPUT_APK_URL: ${{ inputs.apk_url }}
+        run: |
+          set -e
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "==> Ejecución manual (workflow_dispatch) detectada."
+            echo "==> Compilando variante elegida: $INPUT_VARIANT ($INPUT_ARCH)"
+
+            MATRIX_JSON=$(jq -cn \
+              --arg variant "$INPUT_VARIANT" \
+              --arg arch "$INPUT_ARCH" \
+              --arg url "$INPUT_APK_URL" \
+              '{"include": [{"brave_variant": $variant, "architecture": $arch, "apk_url": $url}]}')
+
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "==> Ejecución programada (schedule / cron) detectada."
+          echo "==> Verificando actualizaciones en Brave Browser y dh6k/morphe-patches..."
+
+          # 1. Obtener tag de última versión de parches dh6k
+          LATEST_PATCHES_TAG=$(gh api "repos/dh6k/morphe-patches/releases/latest" --jq .tag_name 2>/dev/null || echo "")
+          echo "Último tag de dh6k/morphe-patches: '$LATEST_PATCHES_TAG'"
+
+          # 2. Obtener tag de última release estable oficial de Brave con APKs
+          LATEST_BRAVE_TAG=$(gh api "repos/brave/brave-browser/releases?per_page=30" | jq -r '
+            map(select((.name | startswith("Release ")) and (.assets | any(.name | endswith(".apk"))))) | first | .tag_name
+          ' 2>/dev/null || echo "")
+          echo "Último tag estable de Brave Browser: '$LATEST_BRAVE_TAG'"
+
+          # 3. Obtener releases previas de este repositorio
+          EXISTING_TAGS=$(gh release list --limit 30 --json tagName --jq '.[].tagName' 2>/dev/null || echo "")
+
+          SAFE_BRAVE_TAG=$(echo "$LATEST_BRAVE_TAG" | tr -d ' ' | tr '/' '-')
+          SAFE_PATCHES_TAG=$(echo "$LATEST_PATCHES_TAG" | tr -d ' ' | tr '/' '-')
+
+          echo "Verificando si ya existen releases para Brave ($SAFE_BRAVE_TAG) y parches ($SAFE_PATCHES_TAG)..."
+
+          if [ -n "$SAFE_BRAVE_TAG" ] && [ -n "$SAFE_PATCHES_TAG" ] && \
+             echo "$EXISTING_TAGS" | grep -q "$SAFE_BRAVE_TAG" && \
+             echo "$EXISTING_TAGS" | grep -q "$SAFE_PATCHES_TAG"; then
+            echo "=========================================================="
+            echo "==> No hay cambios ni actualizaciones de Brave ni de los parches."
+            echo "==> Cancelando ejecución limpiamente sin gastar minutos de Action."
+            echo "=========================================================="
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "matrix={\"include\":[{\"brave_variant\":\"none\",\"architecture\":\"none\",\"apk_url\":\"\"}]}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "==> Nuevas actualizaciones detectadas o compilación pendiente. Generando matriz completa..."
+          MATRIX_JSON=$(jq -cn '{
+            "include": [
+              {"brave_variant": "Stable", "architecture": "armv8", "apk_url": ""},
+              {"brave_variant": "Stable", "architecture": "armv7", "apk_url": ""},
+              {"brave_variant": "Stable", "architecture": "universal", "apk_url": ""},
+              {"brave_variant": "Beta", "architecture": "armv8", "apk_url": ""},
+              {"brave_variant": "Beta", "architecture": "armv7", "apk_url": ""},
+              {"brave_variant": "Beta", "architecture": "universal", "apk_url": ""},
+              {"brave_variant": "Nightly", "architecture": "armv8", "apk_url": ""},
+              {"brave_variant": "Nightly", "architecture": "armv7", "apk_url": ""},
+              {"brave_variant": "Nightly", "architecture": "universal", "apk_url": ""}
+            ]
+          }')
+
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+
   patch:
-    name: Patch & Release Brave (${{ inputs.brave_variant }} - ${{ inputs.architecture }})
+    name: Patch & Release Brave (${{ matrix.brave_variant }} - ${{ matrix.architecture }})
+    needs: check
+    if: needs.check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.check.outputs.matrix) }}
 
     steps:
       - name: Checkout repository
@@ -94,9 +191,9 @@ jobs:
         id: brave
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRAVE_VARIANT: ${{ inputs.brave_variant }}
-          ARCH: ${{ inputs.architecture }}
-          APK_URL: ${{ inputs.apk_url }}
+          BRAVE_VARIANT: ${{ matrix.brave_variant }}
+          ARCH: ${{ matrix.architecture }}
+          APK_URL: ${{ matrix.apk_url }}
         run: |
           set -e
 
@@ -169,18 +266,30 @@ jobs:
           echo "brave_version=$BRAVE_TAG" >> "$GITHUB_OUTPUT"
           ls -lh input.apk
 
+      - name: Inspect compatible patches
+        run: |
+          set -e
+          echo "=========================================================="
+          echo "==> Inspeccionando parches compatibles para com.brave.browser..."
+          echo "=========================================================="
+          java -jar tools/cli.jar list-patches --patches tools/patches.jar --filter-package com.brave.browser 2>/dev/null || \
+          java -jar tools/cli.jar list-patches --patches tools/patches.jar --filter-package-name com.brave.browser -x || \
+          java -jar tools/cli.jar list-patches --patches tools/patches.jar -f com.brave.browser || true
+
       - name: Patch and Sign APK
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
           KEYSTORE_ENTRY_PASSWORD: ${{ secrets.KEYSTORE_ENTRY_PASSWORD }}
+          BRAVE_VARIANT: ${{ matrix.brave_variant }}
+          ARCH: ${{ matrix.architecture }}
         run: |
           set -e
-          OUTPUT_APK="brave-${{ inputs.brave_variant }}-${{ inputs.architecture }}-patched.apk"
+          OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-patched.apk"
           KEYSTORE_ARGS=()
 
-          # Decodificar keystore personalizado si está presente en secretos
+          # Configurar keystore si está presente en los secretos
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
             echo "==> Configurando keystore personalizado desde secretos..."
             mkdir -p certs
@@ -192,10 +301,10 @@ jobs:
               --keystore-entry-password "${KEYSTORE_ENTRY_PASSWORD:-${KEYSTORE_PASSWORD:-}}"
             )
           else
-            echo "==> No se detectó KEYSTORE_BASE64. Morphe CLI usará el keystore integrado por defecto."
+            echo "==> No se detectó KEYSTORE_BASE64. Morphe CLI usará el keystore de depuración por defecto."
           fi
 
-          # Evaluar compatibilidad del flag --merge en el CLI y presencia de integrations.apk
+          # Evaluar compatibilidad de --merge
           MERGE_ARGS=()
           if [ -f "tools/integrations.apk" ]; then
             if java -jar tools/cli.jar patch --help 2>&1 | grep -q -- "--merge"; then
@@ -206,17 +315,52 @@ jobs:
             fi
           fi
 
+          # Asegurar existencia de archivo de fondo de pantalla para el parche
+          WALLPAPER_FILE="assets/wallpaper.png"
+          if [ ! -f "$WALLPAPER_FILE" ]; then
+            mkdir -p assets
+            python3 -c "
+          import struct, zlib
+          w, h = 1920, 1080
+          row = b'\x00' + b'\x18\x1b\x20' * w
+          data = zlib.compress(row * h)
+          with open('assets/wallpaper.png', 'wb') as f:
+              f.write(b'\x89PNG\r\n\x1a\n')
+              ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)
+              f.write(struct.pack('>I', len(ihdr)) + b'IHDR' + ihdr + struct.pack('>I', zlib.crc32(b'IHDR' + ihdr)))
+              f.write(struct.pack('>I', len(data)) + b'IDAT' + data + struct.pack('>I', zlib.crc32(b'IDAT' + data)))
+              f.write(struct.pack('>I', 0) + b'IEND' + struct.pack('>I', zlib.crc32(b'IEND')))
+          "
+          fi
+
+          # Inclusión forzada de parches: Custom NTP wallpaper
+          PATCH_INCLUDE_ARGS=()
+          CLI_HELP=$(java -jar tools/cli.jar patch --help 2>&1 || true)
+          if echo "$CLI_HELP" | grep -q -- "--include"; then
+            PATCH_INCLUDE_ARGS=("--include" "Custom NTP wallpaper" "--include" "custom-wallpaper")
+          elif echo "$CLI_HELP" | grep -q -- "-e, --enable"; then
+            PATCH_INCLUDE_ARGS=("-e" "Custom NTP wallpaper")
+          else
+            PATCH_INCLUDE_ARGS=("-e" "Custom NTP wallpaper")
+          fi
+
+          OPTIONS_ARGS=()
+          if echo "$CLI_HELP" | grep -q -- "-O, --options"; then
+            OPTIONS_ARGS=("-O" "customWallpaper=$PWD/assets/wallpaper.png")
+          fi
+
           echo "=========================================================="
           echo "==> Ejecutando parcheo con Morphe CLI..."
           echo "=========================================================="
           java -jar tools/cli.jar patch \
             --patches tools/patches.jar \
+            ${PATCH_INCLUDE_ARGS[@]+"${PATCH_INCLUDE_ARGS[@]}"} \
+            ${OPTIONS_ARGS[@]+"${OPTIONS_ARGS[@]}"} \
             ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
             ${KEYSTORE_ARGS[@]+"${KEYSTORE_ARGS[@]}"} \
             --out "$OUTPUT_APK" \
             input.apk
 
-          # Limpieza de certificados de seguridad
           rm -rf certs
 
           echo "=========================================================="
@@ -226,42 +370,54 @@ jobs:
 
       - name: Generate Release Notes and Metadata
         id: release_meta
+        env:
+          BRAVE_VARIANT: ${{ matrix.brave_variant }}
+          ARCH: ${{ matrix.architecture }}
+          BRAVE_VERSION: ${{ steps.brave.outputs.brave_version }}
+          PATCHES_VERSION: ${{ steps.tools.outputs.patches_version }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           set -e
-          OUTPUT_APK="brave-${{ inputs.brave_variant }}-${{ inputs.architecture }}-patched.apk"
+          OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-patched.apk"
           SHA256_HASH=$(sha256sum "$OUTPUT_APK" | awk '{print $1}')
           BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
-          TAG_NAME="brave-${{ inputs.brave_variant }}-${{ inputs.architecture }}-v$(date +'%Y.%m.%d-%H%M')"
+
+          SAFE_BRAVE_TAG=$(echo "$BRAVE_VERSION" | tr -d ' ' | tr '/' '-')
+          SAFE_PATCHES_TAG=$(echo "$PATCHES_VERSION" | tr -d ' ' | tr '/' '-')
+          TAG_NAME="brave-${BRAVE_VARIANT}-${ARCH}-${SAFE_BRAVE_TAG}-${SAFE_PATCHES_TAG}"
+
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            SIGNING_STATUS="Firmado con keystore personalizado (persistente)"
+          else
+            SIGNING_STATUS="Firmado con keystore de depuración (Morphe CLI predeterminado)"
+          fi
 
           {
-            echo "# 🦁 Brave Browser Parcheado (dh6k)"
+            echo "# Brave Browser (${BRAVE_VARIANT} - ${ARCH})"
             echo ""
-            echo "Compilación automatizada de **Brave Browser** para Android parcheado con **Morphe CLI** y el catálogo de parches de **[dh6k/morphe-patches](https://github.com/dh6k/morphe-patches)**."
+            echo "Compilación automatizada de Brave Browser para Android parcheado con parches de dh6k/morphe-patches."
             echo ""
-            echo "---"
+            echo "## Información de la compilación"
             echo ""
-            echo "### 📋 Información de la Compilación"
-            echo "| Parámetro | Detalle |"
+            echo "| Parámetro | Valor |"
             echo "| :--- | :--- |"
-            echo "| **Variante** | \`${{ inputs.brave_variant }}\` |"
-            echo "| **Arquitectura** | \`${{ inputs.architecture }}\` |"
-            echo "| **Versión Base de Brave** | \`${{ steps.brave.outputs.brave_version }}\` |"
-            echo "| **Versión Parches dh6k** | \`${{ steps.tools.outputs.patches_version }}\` |"
-            echo "| **Fecha de Compilación** | \`${BUILD_DATE}\` |"
+            echo "| **Versión base de Brave** | \`${BRAVE_VERSION}\` |"
+            echo "| **Versión dh6k/morphe-patches** | \`${PATCHES_VERSION}\` |"
+            echo "| **Arquitectura** | \`${ARCH}\` |"
+            echo "| **Estado de firma** | ${SIGNING_STATUS} |"
+            echo "| **Fecha de compilación** | \`${BUILD_DATE}\` |"
             echo ""
-            echo "---"
+            echo "## Parches aplicados"
             echo ""
-            echo "### 🔒 Integridad del Archivo (Checksum SHA-256)"
+            echo "- **Custom NTP wallpaper**: Soporte para fondos de pantalla personalizados en la nueva pestaña (NTP)."
+            echo "- **Brave Origin**: Desbloqueo de opciones de Brave Origin y limpieza de telemetría/componentes innecesarios."
+            echo "- **Brave Startup Performance Optimization**: Optimización de arranque eliminando latencia de inicialización OEM."
+            echo ""
+            echo "## Integridad del binario (SHA-256)"
+            echo ""
             echo '```text'
             echo "${SHA256_HASH}  ${OUTPUT_APK}"
             echo '```'
-            echo ""
-            echo "---"
-            echo ""
-            echo "### 📲 Instrucciones de Instalación"
-            echo "1. Descarga el archivo \`${OUTPUT_APK}\` adjunto en los **Assets** de esta release."
-            echo "2. Si tienes instalada la versión oficial de Google Play Store, **desinstálala antes** de instalar esta versión (para evitar conflictos de firma)."
-            echo "3. Habilita la opción **Permitir desde esta fuente** si Android lo solicita y procede con la instalación."
           } > release_notes.md
 
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
@@ -273,7 +429,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.release_meta.outputs.tag_name }}
-          name: "Brave ${{ inputs.brave_variant }} (${{ inputs.architecture }})"
+          name: "Brave ${{ matrix.brave_variant }} (${{ matrix.architecture }}) - ${{ steps.brave.outputs.brave_version }}"
           body_path: release_notes.md
           files: ${{ steps.release_meta.outputs.output_apk }}
-          prerelease: ${{ inputs.brave_variant != 'Stable' }}
+          prerelease: ${{ matrix.brave_variant != 'Stable' }}

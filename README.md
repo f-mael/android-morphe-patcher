@@ -1,72 +1,67 @@
-# 🦁 Brave Browser Android Patcher
+# Android Brave Morphe Patcher
 
-Automatización del parcheo y compilación de **Brave Browser para Android** utilizando **Morphe CLI** y los parches de **[dh6k/morphe-patches](https://github.com/dh6k/morphe-patches)** con publicación directa en **GitHub Releases**.
+Pipeline de compilación automatizada para generar versiones parcheadas de Brave Browser para Android mediante Morphe CLI y parches de dh6k/morphe-patches.
 
----
+## Características
 
-## ⚡ Características
+- **Soporte de arquitecturas**: Compilación para `arm64-v8a` (`armv8`), `armeabi-v7a` (`armv7`) y paquetes multiarquitectura (`universal`).
+- **Wallpaper personalizable**: Inclusión forzada de `Custom NTP wallpaper` para admitir fondos personalizados en la nueva pestaña (NTP).
+- **Firma persistente**: Compatibilidad con keystore personalizado mediante GitHub Secrets para permitir actualizaciones continuas de la aplicación sin pérdida de datos, con fallback al keystore interno de depuración.
+- **Optimizaciones dh6k**: Integración de `Brave Origin` (desbloqueo de funciones avanzadas y debloat) y `Brave Startup Performance Optimization` (reducción de tiempos de carga y eliminación de telemetría OEM).
 
-- **Descarga automática**: Obtiene la versión más reciente del APK oficial de Brave desde `brave/brave-browser` en GitHub según el canal y arquitectura elegidos.
-- **Parches de dh6k**: Desbloqueo de opciones avanzadas y **Brave Origin**, fondos de pantalla personalizados en la nueva pestaña (NTP) y limpieza de telemetría.
-- **Firma personalizable**: Soporte para keystore personalizado vía GitHub Secrets para mantener la misma firma entre actualizaciones, o uso del keystore de debug integrado por defecto.
-- **Publicación directa**: Genera una release en GitHub con notas detalladas, versión de parches, fecha y hash SHA-256 del APK listo para instalar.
+## Compilación Manual (`workflow_dispatch`)
 
----
+Para compilar bajo demanda una variante o arquitectura específica:
 
-## 🚀 Cómo Ejecutar el Workflow
+1. Ve a la pestaña **Actions** del repositorio.
+2. Selecciona el workflow **Patch Brave Browser**.
+3. Pulsa **Run workflow** y define los parámetros requeridos:
 
-1. Ve a la pestaña **Actions** en tu repositorio de GitHub.
-2. Selecciona el workflow **Patch Brave Browser** en la columna izquierda.
-3. Haz clic en el botón desplegable **Run workflow** a la derecha.
-4. Elige los parámetros deseados:
-
-| Input | Tipo | Opciones | Default | Descripción |
+| Parámetro | Tipo | Opciones | Por defecto | Descripción |
 | :--- | :--- | :--- | :--- | :--- |
-| `brave_variant` | `choice` | `Stable`, `Beta`, `Nightly` | `Stable` | Canal oficial de Brave Browser. Determina si la release es final o pre-release. |
-| `architecture` | `choice` | `armv8`, `armv7`, `universal` | `armv8` | Arquitectura de CPU del dispositivo Android. |
-| `apk_url` | `string` | URL HTTP/HTTPS directa | *(vacío)* | Opcional. Permite forzar la descarga de un APK específico omitiendo la búsqueda automática. |
+| `brave_variant` | `choice` | `Stable`, `Beta`, `Nightly` | `Stable` | Canal oficial de distribución de Brave. |
+| `architecture` | `choice` | `armv8`, `armv7`, `universal` | `armv8` | Arquitectura de la CPU objetivo. |
+| `apk_url` | `string` | URL directa HTTP/HTTPS | *(vacío)* | URL opcional de un APK específico omitiendo la descarga desde releases oficiales. |
 
-5. Pulsa en **Run workflow**. El proceso toma entre 2 y 4 minutos.
+4. Pulsa **Run workflow**. La compilación individual toma entre 2 y 4 minutos.
 
-### Selección de Arquitectura
-- **`armv8` (arm64-v8a)**: **Recomendado**. Para teléfonos y tablets modernos de 64 bits (descarga `Bravearm64Universal.apk`).
-- **`armv7` (armeabi-v7a)**: Para teléfonos antiguos de 32 bits (descarga `BraveMonoarm.apk`).
-- **`universal`**: Paquete multiarquitectura.
+## Automatización Periódica (`cron`)
 
----
+El repositorio incluye un disparador programado que se ejecuta automáticamente cada 12 horas (`0 */12 * * *`):
 
-## 📥 Descarga del APK Parcheado
+- **Control de redundancia**: Antes de compilar, el workflow compara los tags de versión publicados en este repositorio frente a la última versión disponible en `brave/brave-browser` y `dh6k/morphe-patches`. Si no se detectan nuevas versiones, el proceso finaliza de forma limpia en segundos sin consumir minutos de Action.
+- **Compilación en matriz**: Si se detecta una nueva versión de Brave o de los parches, se ejecuta una matriz paralela de 9 jobs que compila automáticamente todas las combinaciones de variantes (`Stable`, `Beta`, `Nightly`) y arquitecturas (`armv8`, `armv7`, `universal`).
 
-Una vez finalizada la ejecución:
+## Configuración de Keystore para Forks
 
-1. Ve a la pestaña **Releases** en tu repositorio de GitHub (o al enlace directo en la barra lateral derecha).
-2. Localiza la última versión publicada, nombrada:
-   ```text
-   Brave <Variante> (<Arquitectura>)
-   ```
-3. En la sección **Assets**, descarga directamente el archivo `.apk` parcheado:
-   ```text
-   brave-<Variante>-<Arquitectura>-patched.apk
-   ```
-4. Comprueba el hash SHA-256 incluido en la descripción de la release si deseas validar la integridad del archivo.
+Para mantener una clave de firma idéntica entre compilaciones y permitir la actualización de la aplicación sin desinstalarla previamente, configura los siguientes secretos en **Settings > Secrets and variables > Actions**:
 
----
+| Secreto | Descripción |
+| :--- | :--- |
+| `KEYSTORE_BASE64` | Archivo `.keystore` codificado en base64 en una sola línea. |
+| `KEYSTORE_PASSWORD` | Contraseña del almacén de claves. |
+| `KEYSTORE_ALIAS` | Alias de la clave dentro del keystore. |
+| `KEYSTORE_ENTRY_PASSWORD` | Contraseña de la clave privada (opcional si es idéntica a `KEYSTORE_PASSWORD`). |
 
-## 🔑 Firma Personalizada con Keystore (Opcional)
+### Generación y codificación del Keystore
 
-Si deseas actualizar la app en tu teléfono sin necesidad de desinstalarla en cada nueva versión, puedes configurar tu propio almacén de claves en **Settings > Secrets and variables > Actions**:
+Para generar un keystore y obtener su representación en base64:
 
-- `KEYSTORE_BASE64`: Contenido de tu archivo `.keystore` codificado en base64 (`base64 -w 0 mi_llave.keystore`).
-- `KEYSTORE_PASSWORD`: Contraseña del keystore.
-- `KEYSTORE_ALIAS`: Alias de la clave privada.
-- `KEYSTORE_ENTRY_PASSWORD`: Contraseña del alias (si difiere de `KEYSTORE_PASSWORD`).
+```bash
+# Generar clave (si no dispones de una previa)
+keytool -genkey -v -keystore release.keystore -alias brave-patch -keyalg RSA -keysize 2048 -validity 10000
 
-> [!NOTE]
-> Si no configuras estos secretos, Morphe CLI firmará el APK automáticamente con su keystore integrado por defecto.
+# Codificar en base64 (Linux / macOS)
+base64 -w 0 release.keystore
 
----
+# Codificar en base64 (Windows PowerShell)
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("release.keystore"))
+```
 
-## 📲 Instalación en Android
+Si no se configuran estos secretos, Morphe CLI firmará el binario automáticamente con su clave de depuración predeterminada.
 
-> [!WARNING]
-> La primera vez que instales esta versión parcheada, **debes desinstalar primero la versión oficial de Brave de Google Play Store** (debido a que las claves de firma criptográfica son diferentes). Recuerda respaldar tus marcadores y códigos de Brave Sync previamente.
+## Descargas
+
+Los binarios generados se publican directamente en la sección de releases del proyecto:
+
+- [Acceder a Releases](../../releases)
