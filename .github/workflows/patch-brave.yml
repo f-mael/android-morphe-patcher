@@ -333,32 +333,19 @@ jobs:
           "
           fi
 
-          # Inclusión forzada de parches: Custom NTP wallpaper
-          PATCH_INCLUDE_ARGS=()
-          CLI_HELP=$(java -jar tools/cli.jar patch --help 2>&1 || true)
-          if echo "$CLI_HELP" | grep -q -- "--include"; then
-            PATCH_INCLUDE_ARGS=("--include" "Custom NTP wallpaper" "--include" "custom-wallpaper")
-          elif echo "$CLI_HELP" | grep -q -- "-e, --enable"; then
-            PATCH_INCLUDE_ARGS=("-e" "Custom NTP wallpaper")
-          else
-            PATCH_INCLUDE_ARGS=("-e" "Custom NTP wallpaper")
-          fi
-
-          OPTIONS_ARGS=()
-          if echo "$CLI_HELP" | grep -q -- "-O, --options"; then
-            OPTIONS_ARGS=("-O" "customWallpaper=$PWD/assets/wallpaper.png")
-          fi
-
           echo "=========================================================="
           echo "==> Ejecutando parcheo con Morphe CLI..."
           echo "=========================================================="
           java -jar tools/cli.jar patch \
             --patches tools/patches.jar \
-            ${PATCH_INCLUDE_ARGS[@]+"${PATCH_INCLUDE_ARGS[@]}"} \
-            ${OPTIONS_ARGS[@]+"${OPTIONS_ARGS[@]}"} \
+            -e "Custom NTP wallpaper" \
+            -O customWallpaper=assets/wallpaper.png \
+            -e "Mock Brave Origin Premium" \
+            -e "Brave Origin" \
+            -e "Brave Startup Performance Optimization" \
             ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
             ${KEYSTORE_ARGS[@]+"${KEYSTORE_ARGS[@]}"} \
-            --out "$OUTPUT_APK" \
+            -o "$OUTPUT_APK" \
             input.apk
 
           rm -rf certs
