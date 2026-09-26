@@ -411,12 +411,43 @@ jobs:
           echo "output_apk=$OUTPUT_APK" >> "$GITHUB_OUTPUT"
 
       - name: Publish to GitHub Releases
-        uses: softprops/action-gh-release@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.release_meta.outputs.tag_name }}
-          name: "Brave ${{ matrix.brave_variant }} (${{ matrix.architecture }}) - ${{ steps.brave.outputs.brave_version }}"
-          body_path: release_notes.md
-          files: ${{ steps.release_meta.outputs.output_apk }}
-          prerelease: ${{ matrix.brave_variant != 'Stable' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.release_meta.outputs.tag_name }}
+          OUTPUT_APK: ${{ steps.release_meta.outputs.output_apk }}
+          BRAVE_VARIANT: ${{ matrix.brave_variant }}
+          ARCH: ${{ matrix.architecture }}
+          BRAVE_VERSION: ${{ steps.brave.outputs.brave_version }}
+        run: |
+          set -e
+          RELEASE_TITLE="Brave ${BRAVE_VARIANT} (${ARCH}) - ${BRAVE_VERSION}"
+          PRERELEASE_FLAG=""
+          if [ "$BRAVE_VARIANT" != "Stable" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          echo "=========================================================="
+          echo "==> Publicando en GitHub Releases con tag: $TAG_NAME"
+          echo "=========================================================="
+
+          # Si el tag o release ya existía previamente, actualizar y sobreescribir binarios con --clobber
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "La release '$TAG_NAME' ya existe en el repositorio. Actualizando con --clobber..."
+            gh release edit "$TAG_NAME" --title "$RELEASE_TITLE" --notes-file release_notes.md $PRERELEASE_FLAG || true
+            gh release upload "$TAG_NAME" "$OUTPUT_APK" --clobber
+          else
+            echo "Creando nueva release para tag '$TAG_NAME'..."
+            gh release create "$TAG_NAME" "$OUTPUT_APK" \
+              --title "$RELEASE_TITLE" \
+              --notes-file release_notes.md \
+              $PRERELEASE_FLAG 2>/dev/null || \
+            (
+              echo "Aviso: El tag ya existía previamente. Actualizando y subiendo binario con --clobber..."
+              gh release edit "$TAG_NAME" --title "$RELEASE_TITLE" --notes-file release_notes.md $PRERELEASE_FLAG || true
+              gh release upload "$TAG_NAME" "$OUTPUT_APK" --clobber
+            )
+          fi
+
+          echo "=========================================================="
+          echo "==> Publicación completada exitosamente."
+          echo "=========================================================="
