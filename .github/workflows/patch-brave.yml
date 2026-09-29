@@ -29,7 +29,7 @@ name: Patch Brave Browser
         type: string
         default: ''
       wallpaper_resolution:
-        description: 'Resolución de wallpapers (ANCHOxALTO, ej: 1220x2712 o 1080x1920)'
+        description: 'Resolución de wallpapers (ANCHOxALTO, ej: 1220x2712)'
         required: false
         default: '1220x2712'
         type: string
@@ -171,19 +171,38 @@ jobs:
               IM_CMD="convert"
             fi
           fi
-          echo "Utilizando binario de ImageMagick: $IM_CMD"
+          echo "Utilizando binario ImageMagick: $IM_CMD"
 
-          # 2. Asegurar existencia del directorio wallpapers/
+          # 2. Configuración de directorios y resolución
           WALLPAPERS_DIR="wallpapers"
-          mkdir -p "$WALLPAPERS_DIR"
+          CLEAN_DIR="wallpapers_clean"
+          rm -rf "$CLEAN_DIR"
+          mkdir -p "$CLEAN_DIR"
 
-          # Si no hay ninguna imagen, crear fondos de muestra por defecto
-          if [ -z "$(find "$WALLPAPERS_DIR" -maxdepth 1 -type f 2>/dev/null)" ]; then
-            echo "==> Directorio $WALLPAPERS_DIR/ vacío. Generando imágenes de muestra..."
+          RESOLUTION="${WALLPAPER_RES:-1220x2712}"
+          echo "Resolución objetivo: $RESOLUTION"
+
+          # 3. Procesar imágenes si la carpeta wallpapers/ existe y contiene archivos
+          INDEX=0
+          if [ -d "$WALLPAPERS_DIR" ]; then
+            while IFS= read -r -d $'\0' img; do
+              [ -f "$img" ] || continue
+              target_out="$CLEAN_DIR/wallpaper_${INDEX}.png"
+              echo "--> [$INDEX] Normalizando: '$img' -> '$target_out' ($RESOLUTION)"
+
+              $IM_CMD "$img" -resize "${RESOLUTION}^" -gravity center -extent "${RESOLUTION}" "$target_out"
+              INDEX=$((INDEX + 1))
+            done < <(find "$WALLPAPERS_DIR" -maxdepth 1 -type f \( -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.webp" \) -print0 | sort -z)
+          fi
+
+          # 4. Manejo seguro si la carpeta wallpapers/ está vacía o no existe
+          if [ "$INDEX" -eq 0 ]; then
+            echo "==> Aviso: La carpeta $WALLPAPERS_DIR no existe o no contiene imágenes. Generando fondos de muestra..."
             python3 -c "
           import os, struct, zlib
-          os.makedirs('wallpapers', exist_ok=True)
-          def make_png(filename, r, g, b, w=1220, h=2712):
+          os.makedirs('$CLEAN_DIR', exist_ok=True)
+          w, h = map(int, '$RESOLUTION'.split('x')) if 'x' in '$RESOLUTION' else (1220, 2712)
+          def make_png(filename, r, g, b):
               row = b'\x00' + bytes([r, g, b]) * w
               data = zlib.compress(row * h)
               with open(filename, 'wb') as f:
@@ -192,51 +211,24 @@ jobs:
                   f.write(struct.pack('>I', len(ihdr)) + b'IHDR' + ihdr + struct.pack('>I', zlib.crc32(b'IHDR' + ihdr)))
                   f.write(struct.pack('>I', len(data)) + b'IDAT' + data + struct.pack('>I', zlib.crc32(b'IDAT' + data)))
                   f.write(struct.pack('>I', 0) + b'IEND' + struct.pack('>I', zlib.crc32(b'IEND')))
-          make_png('wallpapers/wallpaper_1.png', 24, 27, 32)
-          make_png('wallpapers/wallpaper_2.png', 30, 27, 75)
-          make_png('wallpapers/wallpaper_3.png', 15, 41, 47)
+          make_png('$CLEAN_DIR/wallpaper_0.png', 24, 27, 32)
+          make_png('$CLEAN_DIR/wallpaper_1.png', 30, 27, 75)
+          make_png('$CLEAN_DIR/wallpaper_2.png', 15, 41, 47)
           "
           fi
 
-          echo "Resolución configurada: '${WALLPAPER_RES:-original}'"
-
-          # 3. Iterar sobre todos los archivos dentro de wallpapers/
-          shopt -s nullglob
-          for img in "$WALLPAPERS_DIR"/*; do
-            [ -f "$img" ] || continue
-
-            filename=$(basename "$img")
-            base_no_ext="${filename%.*}"
-            target_png="$WALLPAPERS_DIR/${base_no_ext}.png"
-            tmp_png="$WALLPAPERS_DIR/.tmp_${base_no_ext}.png"
-
-            echo "--> Procesando: $img"
-            if [ -n "$WALLPAPER_RES" ]; then
-              echo "    Recortando y redimensionando proporcionalmente a $WALLPAPER_RES..."
-              $IM_CMD "$img" -resize "${WALLPAPER_RES}^" -gravity center -extent "$WALLPAPER_RES" "$tmp_png"
-            else
-              echo "    Manteniendo dimensiones originales y convirtiendo a PNG estricto..."
-              $IM_CMD "$img" "$tmp_png"
-            fi
-
-            # Si el archivo original no era el PNG destino, eliminarlo
-            if [ "$img" != "$target_png" ]; then
-              rm -f "$img"
-            fi
-            mv -f "$tmp_png" "$target_png"
-          done
-          shopt -u nullglob
-
-          # 4. Eliminar cualquier archivo que no sea PNG para garantizar compatibilidad estricta
-          find "$WALLPAPERS_DIR" -maxdepth 1 -type f ! -name "*.png" -delete
+          # 5. Reemplazar la carpeta wallpapers/ original por wallpapers_clean/
+          rm -rf "$WALLPAPERS_DIR"
+          mv "$CLEAN_DIR" "$WALLPAPERS_DIR"
 
           echo "=========================================================="
-          echo "==> Fondos de pantalla normalizados exitosamente:"
+          echo "==> Fondos de pantalla normalizados y renombrados secuencialmente:"
           ls -lh "$WALLPAPERS_DIR"/*.png
           if command -v identify >/dev/null 2>&1; then
             identify "$WALLPAPERS_DIR"/*.png || true
           fi
           echo "=========================================================="
+
 
       - name: Download Morphe CLI and Resolve Patches
         id: tools
