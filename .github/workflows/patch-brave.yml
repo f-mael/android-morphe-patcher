@@ -28,9 +28,15 @@ name: Patch Brave Browser
         required: false
         type: string
         default: ''
+      wallpaper_resolution:
+        description: 'Resolución de wallpapers (ANCHOxALTO, ej: 1220x2712 o 1080x1920)'
+        required: false
+        default: '1220x2712'
+        type: string
 
 permissions:
   contents: write
+  packages: read
 
 jobs:
   check:
@@ -127,6 +133,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: read
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.check.outputs.matrix) }}
@@ -141,10 +148,102 @@ jobs:
           distribution: 'zulu'
           java-version: '21'
 
-      - name: Download Morphe CLI and dh6k patches
+      - name: Process and Normalize Wallpapers
+        env:
+          WALLPAPER_RES: ${{ inputs.wallpaper_resolution }}
+        run: |
+          set -e
+          echo "=========================================================="
+          echo "==> Procesando y normalizando fondos de pantalla..."
+          echo "=========================================================="
+
+          # 1. Instalar o verificar ImageMagick
+          if command -v magick >/dev/null 2>&1; then
+            IM_CMD="magick"
+          elif command -v convert >/dev/null 2>&1; then
+            IM_CMD="convert"
+          else
+            echo "ImageMagick no encontrado. Instalando..."
+            sudo apt-get update -y && sudo apt-get install -y imagemagick
+            if command -v magick >/dev/null 2>&1; then
+              IM_CMD="magick"
+            else
+              IM_CMD="convert"
+            fi
+          fi
+          echo "Utilizando binario de ImageMagick: $IM_CMD"
+
+          # 2. Asegurar existencia del directorio wallpapers/
+          WALLPAPERS_DIR="wallpapers"
+          mkdir -p "$WALLPAPERS_DIR"
+
+          # Si no hay ninguna imagen, crear fondos de muestra por defecto
+          if [ -z "$(find "$WALLPAPERS_DIR" -maxdepth 1 -type f 2>/dev/null)" ]; then
+            echo "==> Directorio $WALLPAPERS_DIR/ vacío. Generando imágenes de muestra..."
+            python3 -c "
+          import os, struct, zlib
+          os.makedirs('wallpapers', exist_ok=True)
+          def make_png(filename, r, g, b, w=1220, h=2712):
+              row = b'\x00' + bytes([r, g, b]) * w
+              data = zlib.compress(row * h)
+              with open(filename, 'wb') as f:
+                  f.write(b'\x89PNG\r\n\x1a\n')
+                  ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)
+                  f.write(struct.pack('>I', len(ihdr)) + b'IHDR' + ihdr + struct.pack('>I', zlib.crc32(b'IHDR' + ihdr)))
+                  f.write(struct.pack('>I', len(data)) + b'IDAT' + data + struct.pack('>I', zlib.crc32(b'IDAT' + data)))
+                  f.write(struct.pack('>I', 0) + b'IEND' + struct.pack('>I', zlib.crc32(b'IEND')))
+          make_png('wallpapers/wallpaper_1.png', 24, 27, 32)
+          make_png('wallpapers/wallpaper_2.png', 30, 27, 75)
+          make_png('wallpapers/wallpaper_3.png', 15, 41, 47)
+          "
+          fi
+
+          echo "Resolución configurada: '${WALLPAPER_RES:-original}'"
+
+          # 3. Iterar sobre todos los archivos dentro de wallpapers/
+          shopt -s nullglob
+          for img in "$WALLPAPERS_DIR"/*; do
+            [ -f "$img" ] || continue
+
+            filename=$(basename "$img")
+            base_no_ext="${filename%.*}"
+            target_png="$WALLPAPERS_DIR/${base_no_ext}.png"
+            tmp_png="$WALLPAPERS_DIR/.tmp_${base_no_ext}.png"
+
+            echo "--> Procesando: $img"
+            if [ -n "$WALLPAPER_RES" ]; then
+              echo "    Recortando y redimensionando proporcionalmente a $WALLPAPER_RES..."
+              $IM_CMD "$img" -resize "${WALLPAPER_RES}^" -gravity center -extent "$WALLPAPER_RES" "$tmp_png"
+            else
+              echo "    Manteniendo dimensiones originales y convirtiendo a PNG estricto..."
+              $IM_CMD "$img" "$tmp_png"
+            fi
+
+            # Si el archivo original no era el PNG destino, eliminarlo
+            if [ "$img" != "$target_png" ]; then
+              rm -f "$img"
+            fi
+            mv -f "$tmp_png" "$target_png"
+          done
+          shopt -u nullglob
+
+          # 4. Eliminar cualquier archivo que no sea PNG para garantizar compatibilidad estricta
+          find "$WALLPAPERS_DIR" -maxdepth 1 -type f ! -name "*.png" -delete
+
+          echo "=========================================================="
+          echo "==> Fondos de pantalla normalizados exitosamente:"
+          ls -lh "$WALLPAPERS_DIR"/*.png
+          if command -v identify >/dev/null 2>&1; then
+            identify "$WALLPAPERS_DIR"/*.png || true
+          fi
+          echo "=========================================================="
+
+      - name: Download Morphe CLI and Resolve Patches
         id: tools
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
         run: |
           set -e
           mkdir -p tools
@@ -158,24 +257,51 @@ jobs:
           chmod +x tools/cli.jar
 
           echo "=========================================================="
-          echo "==> 2. Descargando bundle de parches dh6k/morphe-patches..."
+          echo "==> 2. Resolviendo bundle de parches..."
           echo "=========================================================="
-          PATCHES_TAG=$(gh release view --repo dh6k/morphe-patches --json tagName --jq .tagName 2>/dev/null || echo "latest")
-          echo "patches_version=$PATCHES_TAG" >> "$GITHUB_OUTPUT"
-
-          if gh release download --repo dh6k/morphe-patches --pattern "*.jar" --dir tools 2>/dev/null; then
-            mv tools/*.jar tools/patches.jar
-          elif gh release download --repo dh6k/morphe-patches --pattern "*.mpp" --dir tools 2>/dev/null; then
-            mv tools/*.mpp tools/patches.jar
+          if [ -f "tools/patches.jar" ]; then
+            echo "Usando tools/patches.jar preexistente..."
+            echo "patches_version=custom-patches" >> "$GITHUB_OUTPUT"
+          elif [ -d "src-patches" ]; then
+            echo "Compilando bundle de parches con rotación múltiple desde src-patches..."
+            (
+              cd src-patches
+              chmod +x gradlew
+              ./gradlew build -x test --no-daemon
+            )
+            BUILT_PATCH=$(find src-patches/patches/build/libs -maxdepth 1 -type f \( -name "*.mpp" -o -name "*.jar" \) 2>/dev/null | head -n 1)
+            if [ -n "$BUILT_PATCH" ] && [ -f "$BUILT_PATCH" ]; then
+              cp "$BUILT_PATCH" tools/patches.jar
+              echo "Bundle de parches compilado exitosamente: $BUILT_PATCH -> tools/patches.jar"
+              echo "patches_version=multi-wallpaper-dev" >> "$GITHUB_OUTPUT"
+            else
+              echo "Error: No se encontró artefacto compilado en src-patches/patches/build/libs/" >&2
+              exit 1
+            fi
           else
-            echo "Error: No se pudo obtener el bundle de parches de dh6k/morphe-patches" >&2
-            exit 1
+            PATCHES_TAG=$(gh release view --repo dh6k/morphe-patches --json tagName --jq .tagName 2>/dev/null || echo "latest")
+            echo "patches_version=$PATCHES_TAG" >> "$GITHUB_OUTPUT"
+
+            if gh release download --repo dh6k/morphe-patches --pattern "*.jar" --dir tools 2>/dev/null; then
+              mv tools/*.jar tools/patches.jar
+            elif gh release download --repo dh6k/morphe-patches --pattern "*.mpp" --dir tools 2>/dev/null; then
+              mv tools/*.mpp tools/patches.jar
+            else
+              echo "Error: No se pudo obtener el bundle de parches de dh6k/morphe-patches" >&2
+              exit 1
+            fi
           fi
 
           echo "=========================================================="
           echo "==> 3. Verificando/descargando integrations APK..."
           echo "=========================================================="
-          if gh release download --repo dh6k/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
+          if [ -f "tools/integrations.apk" ]; then
+            echo "tools/integrations.apk ya existe."
+          elif [ -d "src-patches/extensions" ] && find src-patches/extensions -name "*.apk" | grep -q .; then
+            EXT_APK=$(find src-patches/extensions -name "*.apk" | head -n 1)
+            cp "$EXT_APK" tools/integrations.apk
+            echo "Integrations APK copiado desde src-patches: $EXT_APK"
+          elif gh release download --repo dh6k/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
             mv tools/*.apk tools/integrations.apk
             echo "Integrations APK descargado desde dh6k/morphe-patches."
           elif gh release download --repo MorpheApp/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
@@ -186,6 +312,7 @@ jobs:
           fi
 
           ls -lh tools/
+
 
       - name: Resolve and download Brave APK
         id: brave
@@ -315,23 +442,12 @@ jobs:
             fi
           fi
 
-          # Asegurar existencia de archivo de fondo de pantalla para el parche
-          WALLPAPER_FILE="assets/wallpaper.png"
-          if [ ! -f "$WALLPAPER_FILE" ]; then
-            mkdir -p assets
-            python3 -c "
-          import struct, zlib
-          w, h = 1920, 1080
-          row = b'\x00' + b'\x18\x1b\x20' * w
-          data = zlib.compress(row * h)
-          with open('assets/wallpaper.png', 'wb') as f:
-              f.write(b'\x89PNG\r\n\x1a\n')
-              ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)
-              f.write(struct.pack('>I', len(ihdr)) + b'IHDR' + ihdr + struct.pack('>I', zlib.crc32(b'IHDR' + ihdr)))
-              f.write(struct.pack('>I', len(data)) + b'IDAT' + data + struct.pack('>I', zlib.crc32(b'IDAT' + data)))
-              f.write(struct.pack('>I', 0) + b'IEND' + struct.pack('>I', zlib.crc32(b'IEND')))
-          "
-          fi
+          # Verificar existencia de imágenes en carpeta wallpapers/
+          WALLPAPERS_DIR="wallpapers"
+          echo "=========================================================="
+          echo "==> Fondos de pantalla preparados para el parcheo:"
+          ls -lh "$WALLPAPERS_DIR"/*.png
+          echo "=========================================================="
 
           echo "=========================================================="
           echo "==> Ejecutando parcheo con Morphe CLI..."
@@ -339,7 +455,7 @@ jobs:
           java -jar tools/cli.jar patch \
             --patches tools/patches.jar \
             -e "Custom NTP wallpaper" \
-            -O customWallpaper=assets/wallpaper.png \
+            -O customWallpaper=wallpapers/ \
             -e "Mock Brave Origin Premium" \
             -e "Brave Origin" \
             -e "Brave Startup Performance Optimization" \
@@ -363,6 +479,7 @@ jobs:
           BRAVE_VERSION: ${{ steps.brave.outputs.brave_version }}
           PATCHES_VERSION: ${{ steps.tools.outputs.patches_version }}
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          WALLPAPER_RES: ${{ inputs.wallpaper_resolution }}
         run: |
           set -e
           OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-patched.apk"
@@ -371,7 +488,7 @@ jobs:
 
           SAFE_BRAVE_TAG=$(echo "$BRAVE_VERSION" | tr -d ' ' | tr '/' '-')
           SAFE_PATCHES_TAG=$(echo "$PATCHES_VERSION" | tr -d ' ' | tr '/' '-')
-          TAG_NAME="brave-${BRAVE_VARIANT}-${ARCH}-${SAFE_BRAVE_TAG}-${SAFE_PATCHES_TAG}"
+          TAG_NAME="brave-${BRAVE_VARIANT}-${ARCH}-${SAFE_BRAVE_TAG}-${SAFE_PATCHES_TAG}-TEST-MULTI-WP"
 
           if [ -n "$KEYSTORE_BASE64" ]; then
             SIGNING_STATUS="Firmado con keystore personalizado (persistente)"
@@ -380,23 +497,27 @@ jobs:
           fi
 
           {
-            echo "# Brave Browser (${BRAVE_VARIANT} - ${ARCH})"
+            echo "# Brave Browser (${BRAVE_VARIANT} - ${ARCH}) - TEST-MULTI-WP"
             echo ""
-            echo "Compilación automatizada de Brave Browser para Android parcheado con parches de dh6k/morphe-patches."
+            echo "Compilación de prueba automatizada de Brave Browser con soporte de múltiples fondos de pantalla (Custom NTP Multi-Wallpaper) y rotación aleatoria en tiempo de ejecución."
             echo ""
             echo "## Información de la compilación"
             echo ""
             echo "| Parámetro | Valor |"
             echo "| :--- | :--- |"
             echo "| **Versión base de Brave** | \`${BRAVE_VERSION}\` |"
-            echo "| **Versión dh6k/morphe-patches** | \`${PATCHES_VERSION}\` |"
+            echo "| **Versión de parches** | \`${PATCHES_VERSION}\` |"
             echo "| **Arquitectura** | \`${ARCH}\` |"
             echo "| **Estado de firma** | ${SIGNING_STATUS} |"
             echo "| **Fecha de compilación** | \`${BUILD_DATE}\` |"
+            echo "| **Tag de Release** | \`${TAG_NAME}\` |"
+            if [ -n "$WALLPAPER_RES" ]; then
+              echo "| **Resolución de wallpapers** | \`${WALLPAPER_RES}\` |"
+            fi
             echo ""
             echo "## Parches aplicados"
             echo ""
-            echo "- **Custom NTP wallpaper**: Soporte para fondos de pantalla personalizados en la nueva pestaña (NTP)."
+            echo "- **Custom NTP wallpaper (Multi-Wallpaper & Random Rotation)**: Soporte dinámico para múltiples fondos inyectados por lotes con rotación aleatoria en tiempo de ejecución."
             echo "- **Brave Origin**: Desbloqueo de opciones de Brave Origin y limpieza de telemetría/componentes innecesarios."
             echo "- **Brave Startup Performance Optimization**: Optimización de arranque eliminando latencia de inicialización OEM."
             echo ""
@@ -406,6 +527,7 @@ jobs:
             echo "${SHA256_HASH}  ${OUTPUT_APK}"
             echo '```'
           } > release_notes.md
+
 
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           echo "output_apk=$OUTPUT_APK" >> "$GITHUB_OUTPUT"
@@ -420,11 +542,9 @@ jobs:
           BRAVE_VERSION: ${{ steps.brave.outputs.brave_version }}
         run: |
           set -e
-          RELEASE_TITLE="Brave ${BRAVE_VARIANT} (${ARCH}) - ${BRAVE_VERSION}"
-          PRERELEASE_FLAG=""
-          if [ "$BRAVE_VARIANT" != "Stable" ]; then
-            PRERELEASE_FLAG="--prerelease"
-          fi
+          RELEASE_TITLE="Brave ${BRAVE_VARIANT} (${ARCH}) - ${BRAVE_VERSION} - TEST-MULTI-WP"
+          PRERELEASE_FLAG="--prerelease"
+
 
           echo "=========================================================="
           echo "==> Publicando en GitHub Releases con tag: $TAG_NAME"
