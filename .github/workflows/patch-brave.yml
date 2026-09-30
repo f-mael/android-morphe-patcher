@@ -575,6 +575,14 @@ jobs:
 
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           echo "output_apk=$OUTPUT_APK" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256_HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Patched APK as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: brave-${{ matrix.brave_variant }}-${{ matrix.architecture }}-patched-apk
+          path: ${{ steps.release_meta.outputs.output_apk }}
+          if-no-files-found: error
 
       - name: Publish to GitHub Releases
         env:
@@ -584,34 +592,53 @@ jobs:
           BRAVE_VARIANT: ${{ matrix.brave_variant }}
           ARCH: ${{ matrix.architecture }}
           BRAVE_VERSION: ${{ steps.brave.outputs.brave_version }}
+          SHA256_HASH: ${{ steps.release_meta.outputs.sha256 }}
         run: |
           set -e
           RELEASE_TITLE="Brave ${BRAVE_VARIANT} (${ARCH}) - ${BRAVE_VERSION} - TEST-MULTI-WP"
           PRERELEASE_FLAG="--prerelease"
 
-
           echo "=========================================================="
           echo "==> Publicando en GitHub Releases con tag: $TAG_NAME"
           echo "=========================================================="
 
-          # Si el tag o release ya existía previamente, actualizar y sobreescribir binarios con --clobber
+          # Si la release ya existía previamente con fecha antigua, eliminarla para refrescar
+          # la fecha de creación y asegurar que aparezca al inicio de GitHub Releases
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            echo "La release '$TAG_NAME' ya existe en el repositorio. Actualizando con --clobber..."
+            echo "Eliminando release anterior '$TAG_NAME' para refrescar fecha y orden en GitHub Releases..."
+            gh release delete "$TAG_NAME" --yes 2>/dev/null || true
+            git push --delete origin "$TAG_NAME" 2>/dev/null || true
+          fi
+
+          echo "Creando release para tag '$TAG_NAME'..."
+          if ! gh release create "$TAG_NAME" "$OUTPUT_APK" \
+            --title "$RELEASE_TITLE" \
+            --notes-file release_notes.md \
+            $PRERELEASE_FLAG \
+            --clobber; then
+            echo "Aviso: No se pudo crear como nueva release. Actualizando release existente..."
             gh release edit "$TAG_NAME" --title "$RELEASE_TITLE" --notes-file release_notes.md $PRERELEASE_FLAG || true
             gh release upload "$TAG_NAME" "$OUTPUT_APK" --clobber
-          else
-            echo "Creando nueva release para tag '$TAG_NAME'..."
-            gh release create "$TAG_NAME" "$OUTPUT_APK" \
-              --title "$RELEASE_TITLE" \
-              --notes-file release_notes.md \
-              $PRERELEASE_FLAG 2>/dev/null || \
-            (
-              echo "Aviso: El tag ya existía previamente. Actualizando y subiendo binario con --clobber..."
-              gh release edit "$TAG_NAME" --title "$RELEASE_TITLE" --notes-file release_notes.md $PRERELEASE_FLAG || true
-              gh release upload "$TAG_NAME" "$OUTPUT_APK" --clobber
-            )
           fi
+
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${TAG_NAME}"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/${OUTPUT_APK}"
 
           echo "=========================================================="
           echo "==> Publicación completada exitosamente."
+          echo "==> Ver Release en: $RELEASE_URL"
+          echo "==> Descarga directa del APK: $DOWNLOAD_URL"
           echo "=========================================================="
+
+          {
+            echo "### 🚀 APK Parcheado Disponible"
+            echo ""
+            echo "| Parámetro | Enlace / Valor |"
+            echo "| :--- | :--- |"
+            echo "| **Release** | [${RELEASE_TITLE}](${RELEASE_URL}) |"
+            echo "| **Descarga directa APK** | [${OUTPUT_APK}](${DOWNLOAD_URL}) |"
+            echo "| **SHA-256** | \`${SHA256_HASH}\` |"
+            echo ""
+            echo "> [!TIP]"
+            echo "> El APK también se encuentra disponible para descarga directa en la sección **Artifacts** de esta ejecución."
+          } >> "$GITHUB_STEP_SUMMARY"
