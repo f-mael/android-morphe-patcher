@@ -386,12 +386,16 @@ jobs:
           ls -lh input.apk
 
       - name: Inspect compatible patches
+        continue-on-error: true
         run: |
-          set -e
           echo "=========================================================="
-          echo "==> Inspeccionando parches compatibles para com.brave.browser..."
+          echo "==> Inspeccionando parches compatibles..."
           echo "=========================================================="
-          java -jar tools/cli.jar list-patches --patches tools/patches.jar --filter-package com.brave.browser
+          java -jar tools/cli.jar list-patches \
+            --patches tools/patches.jar \
+            -p 2>/dev/null || \
+          java -jar tools/cli.jar list-patches \
+            --patches tools/patches.jar || true
 
       - name: Patch and Sign APK
         env:
