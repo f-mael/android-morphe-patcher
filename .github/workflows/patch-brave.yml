@@ -259,7 +259,7 @@ jobs:
             (
               cd src-patches
               chmod +x gradlew
-              ./gradlew build -x test --no-daemon
+              ./gradlew build --no-daemon
             )
             BUILT_PATCH=$(find src-patches/patches/build/libs -maxdepth 1 -type f \( -name "*.mpp" -o -name "*.jar" \) 2>/dev/null | head -n 1)
             if [ -n "$BUILT_PATCH" ] && [ -f "$BUILT_PATCH" ]; then
@@ -391,9 +391,7 @@ jobs:
           echo "=========================================================="
           echo "==> Inspeccionando parches compatibles para com.brave.browser..."
           echo "=========================================================="
-          java -jar tools/cli.jar list-patches --patches tools/patches.jar --filter-package com.brave.browser 2>/dev/null || \
-          java -jar tools/cli.jar list-patches --patches tools/patches.jar --filter-package-name com.brave.browser -x || \
-          java -jar tools/cli.jar list-patches --patches tools/patches.jar -f com.brave.browser || true
+          java -jar tools/cli.jar list-patches --patches tools/patches.jar --filter-package com.brave.browser
 
       - name: Patch and Sign APK
         env:
@@ -446,11 +444,10 @@ jobs:
           echo "=========================================================="
           java -jar tools/cli.jar patch \
             --patches tools/patches.jar \
-            -e "Custom NTP wallpaper" \
+            --include "Brave Origin" \
+            --include "Custom NTP wallpaper" \
+            --include "Brave Startup Performance Optimization" \
             -O customWallpaper=wallpapers/ \
-            -e "Mock Brave Origin Premium" \
-            -e "Brave Origin" \
-            -e "Brave Startup Performance Optimization" \
             ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
             ${KEYSTORE_ARGS[@]+"${KEYSTORE_ARGS[@]}"} \
             -o "$OUTPUT_APK" \

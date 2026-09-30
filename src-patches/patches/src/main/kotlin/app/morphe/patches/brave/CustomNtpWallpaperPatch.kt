@@ -299,6 +299,11 @@ internal fun readPngDimensions(file: File): WallpaperDimensions? =
 
 internal fun installWallpaperResource(resourceDirectory: File, sourceFiles: List<File>): Int {
     val drawableDirectory = resourceDirectory.resolve("drawable-nodpi").apply(File::mkdirs)
+    // Clean any previous custom wallpaper drawables to avoid orphan indexed files
+    drawableDirectory.listFiles { file ->
+        file.name.startsWith(NTP_WALLPAPER_PREFIX) || file.name.startsWith(NTP_WALLPAPER_RESOURCE_NAME)
+    }?.forEach { it.delete() }
+
     sourceFiles.forEachIndexed { index, file ->
         file.copyTo(
             target = drawableDirectory.resolve("ntp_wallpaper_$index.png"),
@@ -448,8 +453,21 @@ val customNtpWallpaperPatch: BytecodePatch = bytecodePatch(
         }
 
         // Secondary: keep JNI factories consistent if some path still reads them.
-        // Native loaders ignore android.resource://, so this is best-effort only.
-        val pkg = packageMetadata.packageName?.takeIf { it.isNotBlank() } ?: "com.brave.browser"
+        // Resolve package matching actual APK (com.brave.browser, com.brave.browser_beta, or com.brave.browser_nightly)
+        var detectedPkg = packageMetadata.packageName?.takeIf { it.isNotBlank() }
+        if (detectedPkg == null) {
+            classDefForEach { classDef ->
+                if (detectedPkg != null) return@classDefForEach
+                val type = classDef.type
+                when {
+                    type.startsWith("Lcom/brave/browser_nightly/") -> detectedPkg = "com.brave.browser_nightly"
+                    type.startsWith("Lcom/brave/browser_beta/") -> detectedPkg = "com.brave.browser_beta"
+                    type.startsWith("Lcom/brave/browser/") -> detectedPkg = "com.brave.browser"
+                }
+            }
+        }
+        val pkg = detectedPkg ?: "com.brave.browser"
+
         CreateWallpaperFingerprint.methodOrNull?.addInstructions(
             0,
             forceCreateWallpaperParamsSmali(pkg, wallpaperCount),
