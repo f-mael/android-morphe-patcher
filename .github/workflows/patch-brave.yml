@@ -425,17 +425,6 @@ jobs:
             echo "==> No se detectó KEYSTORE_BASE64. Morphe CLI usará el keystore de depuración por defecto."
           fi
 
-          # Evaluar compatibilidad de --merge
-          MERGE_ARGS=()
-          if [ -f "tools/integrations.apk" ]; then
-            if java -jar tools/cli.jar patch --help 2>&1 | grep -q -- "--merge"; then
-              echo "CLI soporta opción --merge; adjuntando tools/integrations.apk..."
-              MERGE_ARGS=("--merge" "tools/integrations.apk")
-            else
-              echo "tools/integrations.apk disponible pero Morphe CLI empaqueta las integraciones internamente; omitiendo --merge."
-            fi
-          fi
-
           # Verificar existencia de imágenes en carpeta wallpapers/
           WALLPAPERS_DIR="wallpapers"
           echo "=========================================================="
@@ -443,21 +432,83 @@ jobs:
           ls -lh "$WALLPAPERS_DIR"/*.png
           echo "=========================================================="
 
+          # 1. Depuración previa (segura): volcar flags soportados por la versión de Morphe CLI sin romper el runner
+          echo "=========================================================="
+          echo "==> Flags soportados por Morphe CLI patch (depuración previa):"
+          echo "=========================================================="
+          java -jar tools/cli.jar patch --help || true
+
+          # 2. Generar archivo temporal options.json con la clave exacta definida en CustomNtpWallpaperPatch.kt
+          echo "=========================================================="
+          echo "==> Generando options.json con clave customWallpaper..."
+          echo "=========================================================="
+          java -jar tools/cli.jar options-create --patches tools/patches.jar --out options.json 2>/dev/null || true
+
+          python3 -c "
+          import json, os
+          opts_path = 'options.json'
+          data = []
+          if os.path.exists(opts_path):
+              try:
+                  with open(opts_path, 'r', encoding='utf-8') as f:
+                      data = json.load(f)
+              except Exception:
+                  data = []
+          if not data or not isinstance(data, list):
+              data = [{'patches': {}}]
+          for bundle in data:
+              patches = bundle.setdefault('patches', {})
+              wp = patches.setdefault('Custom NTP wallpaper', {})
+              wp['enabled'] = True
+              wp.setdefault('options', {})['customWallpaper'] = 'wallpapers/'
+              if 'Brave Origin' in patches:
+                  patches['Brave Origin']['enabled'] = True
+              if 'Brave Startup Performance Optimization' in patches:
+                  patches['Brave Startup Performance Optimization']['enabled'] = True
+          with open(opts_path, 'w', encoding='utf-8') as f:
+              json.dump(data, f, indent=2)
+          "
+          echo "--> options.json configurado:"
+          cat options.json
+
+          # 3. Detectar soporte de flags en Morphe CLI
+          HELP_TEXT=$(java -jar tools/cli.jar patch --help 2>&1 || true)
+
+          # Flags para inclusión de parches: -e / --enable
+          if echo "$HELP_TEXT" | grep -q -- "--include"; then
+            ENABLE_FLAG="--include"
+          else
+            ENABLE_FLAG="--enable"
+          fi
+
+          # Flags para archivo de opciones
+          OPTIONS_FILE_ARGS=()
+          if echo "$HELP_TEXT" | grep -q -- "--options-file"; then
+            OPTIONS_FILE_ARGS=("--options-file" "options.json")
+          fi
+
+          # Detección del flag para opciones inline (-O o --options)
+          if echo "$HELP_TEXT" | grep -q -- "--options="; then
+            PATCH_OPT_FLAG="--options"
+          else
+            PATCH_OPT_FLAG="-O"
+          fi
+
           echo "=========================================================="
           echo "==> Ejecutando parcheo con Morphe CLI..."
           echo "=========================================================="
           java -jar tools/cli.jar patch \
             --patches tools/patches.jar \
-            --include "Brave Origin" \
-            --include "Custom NTP wallpaper" \
-            --include "Brave Startup Performance Optimization" \
-            -O customWallpaper=wallpapers/ \
-            ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
+            $ENABLE_FLAG "Brave Origin" \
+            $ENABLE_FLAG "Custom NTP wallpaper" \
+            $PATCH_OPT_FLAG customWallpaper=wallpapers/ \
+            $ENABLE_FLAG "Brave Startup Performance Optimization" \
+            ${OPTIONS_FILE_ARGS[@]+"${OPTIONS_FILE_ARGS[@]}"} \
             ${KEYSTORE_ARGS[@]+"${KEYSTORE_ARGS[@]}"} \
             -o "$OUTPUT_APK" \
             input.apk
 
-          rm -rf certs
+          rm -rf certs options.json
 
           echo "=========================================================="
           echo "==> APK parcheado exitosamente:"
