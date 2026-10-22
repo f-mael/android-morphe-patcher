@@ -177,14 +177,13 @@ if [ "$THEME_MODE" = "all" ] || [ "$THEME_MODE" = "standard" ]; then
 
   PATCHES_JSON=$(printf '%s\n' "${BASE_APPLIED_NAMES[@]}" | jq -R . | jq -s .)
 
-  GENERATED_APKS_JSON+=(
-    $(jq -cn \
-      --arg file "$STD_APK" \
-      --arg theme "standard" \
-      --arg sha "$STD_HASH" \
-      --argjson patches "$PATCHES_JSON" \
-      '{filename: $file, theme: $theme, sha256: $sha, applied_patches: $patches}')
-  )
+  STD_ENTRY=$(jq -cn \
+    --arg file "$STD_APK" \
+    --arg theme "standard" \
+    --arg sha "$STD_HASH" \
+    --argjson patches "$PATCHES_JSON" \
+    '{filename: $file, theme: $theme, sha256: $sha, applied_patches: $patches}')
+  GENERATED_APKS_JSON+=("$STD_ENTRY")
 fi
 
 # 7. Compilar AMOLED si corresponde
@@ -210,14 +209,13 @@ if [ "$THEME_MODE" = "all" ] || [ "$THEME_MODE" = "amoled" ]; then
 
   AMOLED_PATCHES_JSON=$(printf '%s\n' "${AMOLED_APPLIED[@]}" | jq -R . | jq -s .)
 
-  GENERATED_APKS_JSON+=(
-    $(jq -cn \
-      --arg file "$AMOLED_APK" \
-      --arg theme "amoled" \
-      --arg sha "$AMOLED_HASH" \
-      --argjson patches "$AMOLED_PATCHES_JSON" \
-      '{filename: $file, theme: $theme, sha256: $sha, applied_patches: $patches}')
-  )
+  AMOLED_ENTRY=$(jq -cn \
+    --arg file "$AMOLED_APK" \
+    --arg theme "amoled" \
+    --arg sha "$AMOLED_HASH" \
+    --argjson patches "$AMOLED_PATCHES_JSON" \
+    '{filename: $file, theme: $theme, sha256: $sha, applied_patches: $patches}')
+  GENERATED_APKS_JSON+=("$AMOLED_ENTRY")
 fi
 
 # 8. Guardar metadata estructurada en JSON
