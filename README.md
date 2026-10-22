@@ -18,6 +18,9 @@ Compilaciones automatizadas de **Brave Browser** para Android parcheadas con **M
   5. **Brave AMOLED theme** *(variante AMOLED)*: Fondo negro puro `#000000` y desactivación de dynamic colors.
 - **Entregas automáticas unificadas**: Generación periódica (cada 12 horas) y firma de todos los APKs en una única release en la sección de [Releases](../../releases).
 
+> [!NOTE]
+> Las notas de cada release indican los parches **realmente aplicados**. Si un parche deja de ser compatible con una versión nueva de Brave, se omite, se registra como advertencia y el resto de la compilación continúa. La release falla si no se aplica ningún parche o si se pidió la variante AMOLED y su parche no está disponible.
+
 ---
 
 ## 📲 Guía de instalación
@@ -69,6 +72,9 @@ Si deseas firmar los APKs con tu propia clave para mantener la misma firma entre
 
 *Si no se configuran estos secretos, Morphe CLI firmará automáticamente con un keystore de depuración predeterminado.*
 
+> [!WARNING]
+> El keystore de depuración de Morphe es **público y compartido** por todas las compilaciones que no configuran secretos. Cualquiera podría generar un APK con la misma firma. Configura tu propio `KEYSTORE_BASE64` si vas a instalar estos APKs en un dispositivo real o a distribuirlos.
+
 ---
 
 ## 🛠️ Ejecución manual (`workflow_dispatch`)
@@ -79,6 +85,26 @@ Puedes compilar manualmente desde la pestaña **Actions > Patch Brave Browser > 
 - **Arquitectura**: `all` (todas), `armv8`, `armv7`, o `universal`.
 - **Tema**: `all` (ambas), `standard`, o `amoled`.
 - **URL APK personalizada**: *(Opcional)* Enlace directo a un archivo APK de Brave específico.
+
+Algunas consideraciones sobre ejecuciones manuales:
+
+- Una compilación **parcial** (por arquitectura o por tema) crea su **propia release**, con el sufijo correspondiente en el tag (por ejemplo `brave-v1.98.60-v1.9.0-armv8-amoled`), para no sobrescribir las notas ni los checksums de la release completa.
+- Si indicas una **URL de APK personalizada**, se genera un único APK a partir de ese archivo (un solo job, sin división por arquitectura) y una release independiente con marca de tiempo.
+- Si pides explícitamente `Beta` o `Nightly` y esa variante no tiene APKs publicados, el workflow falla con un error en lugar de compilar Stable con una etiqueta equivocada.
+
+---
+
+## 🧩 Estructura del proyecto
+
+| Ruta | Descripción |
+| :--- | :--- |
+| `.github/workflows/patch-brave.yml` | Pipeline principal: resolución de versiones, matriz, compilación y publicación. |
+| `.github/workflows/lint.yml` | Análisis estático de scripts (`shellcheck`) y workflows (`actionlint`). |
+| `scripts/resolve-matrix.sh` | Resuelve versiones upstream y decide qué compilar (incluye la detección de cambios del cron). |
+| `scripts/setup-tools.sh` | Descarga Morphe CLI y el bundle de parches, y registra sus versiones. |
+| `scripts/build-apk.sh` | Descarga el APK base, aplica los parches y genera APKs + metadatos + checksums. |
+| `scripts/publish-release.sh` | Consolida artefactos, genera las notas de release y publica en GitHub Releases. |
+| `assets/wallpaper.png` | Imagen usada por el parche `Custom NTP wallpaper`. |
 
 ---
 

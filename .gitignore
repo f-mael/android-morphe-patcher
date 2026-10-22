@@ -22,6 +22,16 @@ out/
 dist/
 tmp/
 temp/
+release-assets/
+
+# ==============================================================================
+# Generated Release Artifacts (los produce scripts/*.sh en cada ejecución)
+# ==============================================================================
+release_notes.md
+metadata-*.json
+checksums.txt
+certs/
+result-*.json
 
 # ==============================================================================
 # Local Environment Variables & Keystores

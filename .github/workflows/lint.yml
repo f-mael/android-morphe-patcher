@@ -7,6 +7,7 @@ name: Lint
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,23 +16,37 @@ jobs:
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@master
+        uses: ludeeus/action-shellcheck@2.0.0
         with:
-          scandir: 'scripts'
+          scandir: './scripts'
 
   actionlint:
     name: Actionlint
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ACTIONLINT_VERSION: '1.7.12'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run actionlint
+      - name: Install actionlint
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-          ./actionlint -color -ignore 'runtime "node20" is deprecated'
+          set -euo pipefail
+          gh release download "v${ACTIONLINT_VERSION}" \
+            --repo rhysd/actionlint \
+            --pattern '*linux_amd64.tar.gz' \
+            --dir "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP"/actionlint_*linux_amd64.tar.gz -C "$RUNNER_TEMP" actionlint
+          sudo install -m 0755 "$RUNNER_TEMP/actionlint" /usr/local/bin/actionlint
+
+      - name: Run actionlint
+        run: actionlint -color

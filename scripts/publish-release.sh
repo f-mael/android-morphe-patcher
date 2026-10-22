@@ -3,8 +3,11 @@ set -euo pipefail
 
 # ==============================================================================
 # publish-release.sh
-# Consolida metadatos JSON de todas las legs, genera las notas de release
-# y publica o actualiza la release en GitHub Releases.
+# Consolida los metadatos JSON de todas las legs, genera las notas de release y
+# publica o actualiza la release en GitHub Releases.
+#
+# Uso: publish-release.sh <assets_dir> <tag> <title> <patches_version> \
+#                         <prerelease> <patch_result>
 # ==============================================================================
 
 ASSETS_DIR="${1:-release-assets}"
@@ -15,7 +18,7 @@ PRERELEASE="${5:-false}"
 PATCH_RESULT="${6:-success}"
 
 if [ -z "$RELEASE_TAG" ] || [ -z "$RELEASE_TITLE" ]; then
-  echo "Error: Se requieren RELEASE_TAG y RELEASE_TITLE." >&2
+  echo "Error: se requieren RELEASE_TAG y RELEASE_TITLE." >&2
   exit 1
 fi
 
@@ -26,29 +29,59 @@ echo "    Título:       $RELEASE_TITLE"
 echo "    Resultado CI: $PATCH_RESULT"
 echo "=========================================================="
 
-# Verificar existencia de APKs
+# ------------------------------------------------------------------------------
+# 1. Validaciones
+# ------------------------------------------------------------------------------
 if ! compgen -G "${ASSETS_DIR}/*.apk" > /dev/null; then
-  echo "Error: No se encontró ningún archivo APK en ${ASSETS_DIR}." >&2
+  echo "Error: no se encontró ningún archivo APK en ${ASSETS_DIR}." >&2
   exit 1
 fi
 
-# 1. Consolidar checksums
-cat "${ASSETS_DIR}"/*.sha256 > "${ASSETS_DIR}/checksums.txt"
+if ! compgen -G "${ASSETS_DIR}/metadata-*.json" > /dev/null; then
+  echo "Error: no se encontró ningún archivo de metadatos en ${ASSETS_DIR}." >&2
+  exit 1
+fi
 
-# 2. Consolidar metadatos JSON
-ALL_METAS=$(jq -s '.' "${ASSETS_DIR}"/metadata-*.json 2>/dev/null || echo "[]")
+# ------------------------------------------------------------------------------
+# 2. Consolidar checksums
+# ------------------------------------------------------------------------------
+sort "${ASSETS_DIR}"/*.sha256 > "${ASSETS_DIR}/checksums.txt"
 
-# 3. Detectar estado de firma general
-IS_CUSTOM=$(echo "$ALL_METAS" | jq -r '.[].signing_status' | grep -q "custom" && echo "true" || echo "false")
-if [ "$IS_CUSTOM" = "true" ]; then
+# ------------------------------------------------------------------------------
+# 3. Consolidar metadatos
+# ------------------------------------------------------------------------------
+ALL_METAS=$(jq -s '.' "${ASSETS_DIR}"/metadata-*.json)
+
+TOTAL_LEGS=$(printf '%s' "$ALL_METAS" | jq 'length')
+CUSTOM_LEGS=$(printf '%s' "$ALL_METAS" | jq '[.[] | select(.signing_status == "custom")] | length')
+
+if [ "$CUSTOM_LEGS" -eq 0 ]; then
+  SIGNING_INFO="Firmado con keystore de depuración (Morphe CLI predeterminado)"
+elif [ "$CUSTOM_LEGS" -eq "$TOTAL_LEGS" ]; then
   SIGNING_INFO="Firmado con keystore personalizado (persistente)"
 else
-  SIGNING_INFO="Firmado con keystore de depuración (Morphe CLI predeterminado)"
+  SIGNING_INFO="⚠️ Firma mixta: ${CUSTOM_LEGS}/${TOTAL_LEGS} legs con keystore personalizado"
+fi
+
+CLI_VERSION=$(printf '%s' "$ALL_METAS" | jq -r '[.[].cli_version // empty] | unique | join(", ")')
+[ -n "$CLI_VERSION" ] || CLI_VERSION="desconocida"
+
+# La versión real del bundle la registra setup-tools.sh en los metadatos; tiene
+# prioridad sobre el valor resuelto en el job `check`.
+META_PATCHES_VERSION=$(printf '%s' "$ALL_METAS" | jq -r '[.[].patches_version // empty] | unique | join(", ")')
+if [ -n "$META_PATCHES_VERSION" ]; then
+  PATCHES_VERSION="$META_PATCHES_VERSION"
 fi
 
 BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
 
+# Parches realmente aplicados en todos los APKs publicados
+APPLIED_MD=$(printf '%s' "$ALL_METAS" | jq -r '[.[].apks[].applied_patches[]?] | unique | .[] | "- **\(.)**"')
+MISSING_MD=$(printf '%s' "$ALL_METAS" | jq -r '[.[].missing_patches[]?] | unique | .[] | "> - **\(.)**"')
+
+# ------------------------------------------------------------------------------
 # 4. Generar release_notes.md
+# ------------------------------------------------------------------------------
 {
   echo "# Brave Browser Android (Morphe Patched)"
   echo ""
@@ -57,7 +90,16 @@ BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
 
   if [ "$PATCH_RESULT" = "failure" ]; then
     echo "> [!WARNING]"
-    echo "> Algunas compilaciones fallaron durante la ejecución de la matriz. Se publican los binarios que completaron el proceso exitosamente."
+    echo "> Algunas compilaciones fallaron durante la ejecución de la matriz. Se publican solo los binarios que terminaron correctamente."
+    echo ""
+  fi
+
+  if [ -n "$MISSING_MD" ]; then
+    echo "> [!NOTE]"
+    echo "> Los siguientes parches no pudieron aplicarse en algunas variantes (incompatibilidad con la versión de Brave):"
+    printf '%s\n' "$MISSING_MD"
+    echo ">"
+    echo "> El detalle por APK está en \`metadata-*.json\`; no se publica como asset, pero queda en el log del workflow."
     echo ""
   fi
 
@@ -66,6 +108,7 @@ BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
   echo "| Parámetro | Valor |"
   echo "| :--- | :--- |"
   echo "| **Versión dh6k/morphe-patches** | \`${PATCHES_VERSION}\` |"
+  echo "| **Versión Morphe CLI** | \`${CLI_VERSION}\` |"
   echo "| **Estado de firma** | ${SIGNING_INFO} |"
   echo "| **Fecha de compilación** | \`${BUILD_DATE}\` |"
   echo ""
@@ -74,21 +117,27 @@ BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
   echo "| Variante | Arquitectura | Tema | Versión Base | Archivo APK |"
   echo "| :--- | :--- | :--- | :--- | :--- |"
 
-  echo "$ALL_METAS" | jq -r '
-    .[] as $group |
-    $group.apks[] |
-    (if .theme == "amoled" then "🖤 AMOLED" else "Estándar" end) as $theme_label |
-    "| **\($group.variant)** | `\($group.architecture)` | \($theme_label) | `\($group.brave_version)` | `\(.filename)` |"
+  printf '%s' "$ALL_METAS" | jq -r '
+    def vorder: if .variant == "Stable" then 0 elif .variant == "Beta" then 1 elif .variant == "Nightly" then 2 else 3 end;
+    def aorder: if .architecture == "armv8" then 0 elif .architecture == "armv7" then 1 elif .architecture == "universal" then 2 else 3 end;
+    def torder: if .theme == "standard" then 0 else 1 end;
+
+    [ .[] as $group | $group.apks[] | {group: $group, apk: .} ]
+    | sort_by([(.group | vorder), (.group | aorder), (.apk | torder)])
+    | .[]
+    | (if .apk.theme == "amoled" then "🖤 AMOLED" else "Estándar" end) as $theme_label
+    | "| **\(.group.variant)** | `\(.group.architecture)` | \($theme_label) | `\(.group.brave_version)` | `\(.apk.filename)` |"
   '
 
   echo ""
-  echo "## Parches de Brave aplicados"
+  echo "## Parches aplicados"
   echo ""
-  echo "- **Brave Origin**: Desbloqueo de opciones y controles avanzados de funciones."
-  echo "- **Brave Startup Performance Optimization**: Eliminación de comprobaciones y latencia OEM en el arranque."
-  echo "- **Custom NTP wallpaper**: Fondo personalizado en la Nueva Pestaña (NTP)."
-  echo "- **Brave NTP four-column tiles**: Mantiene las tarjetas en cuadrícula de 4 columnas descendente con fondo activado."
-  echo "- **Brave AMOLED theme** *(variantes AMOLED)*: Superficies oscuras en negro puro OLED (\`#000000\`) y desactivación de Material You."
+  if [ -n "$APPLIED_MD" ]; then
+    printf '%s\n' "$APPLIED_MD"
+  else
+    echo "_No se registraron parches aplicados._"
+  fi
+
   echo ""
   echo "## Verificación de integridad (SHA-256)"
   echo ""
@@ -98,11 +147,13 @@ BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
 } > release_notes.md
 
 echo "=========================================================="
-echo "Release Notes generadas:"
+echo "Release notes generadas:"
 echo "=========================================================="
 cat release_notes.md
 
+# ------------------------------------------------------------------------------
 # 5. Publicar o actualizar en GitHub Releases
+# ------------------------------------------------------------------------------
 PRERELEASE_FLAG=""
 if [ "$PRERELEASE" = "true" ]; then
   PRERELEASE_FLAG="--prerelease"
@@ -112,10 +163,12 @@ FILES_TO_UPLOAD=( "${ASSETS_DIR}"/*.apk "${ASSETS_DIR}/checksums.txt" )
 
 if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
   echo "==> Actualizando release existente '$RELEASE_TAG'..."
-  gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE" --notes-file release_notes.md $PRERELEASE_FLAG || true
+  if ! gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE" --notes-file release_notes.md $PRERELEASE_FLAG; then
+    echo "::warning::No se pudieron actualizar las notas de '$RELEASE_TAG'; se continúa con la subida de binarios."
+  fi
   gh release upload "$RELEASE_TAG" "${FILES_TO_UPLOAD[@]}" --clobber
 else
-  echo "==> Creando nueva release única '$RELEASE_TAG'..."
+  echo "==> Creando nueva release '$RELEASE_TAG'..."
   gh release create "$RELEASE_TAG" "${FILES_TO_UPLOAD[@]}" \
     --title "$RELEASE_TITLE" \
     --notes-file release_notes.md \

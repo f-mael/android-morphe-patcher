@@ -3,7 +3,8 @@ set -euo pipefail
 
 # ==============================================================================
 # resolve-matrix.sh
-# Determina versiones upstream, verifica si ya existe release, y construye la matriz.
+# Determina versiones upstream, decide si hay algo que compilar y construye la
+# matriz de jobs. Los resultados se escriben en $GITHUB_OUTPUT.
 # ==============================================================================
 
 EVENT_NAME="${EVENT_NAME:-workflow_dispatch}"
@@ -13,39 +14,68 @@ INPUT_THEME="${INPUT_THEME:-all}"
 INPUT_APK_URL="${INPUT_APK_URL:-}"
 GITHUB_OUTPUT="${GITHUB_OUTPUT:-/dev/stdout}"
 
-echo "=========================================================="
-echo "==> 1. Resolviendo versión de dh6k/morphe-patches..."
-echo "=========================================================="
-# Buscar la última release (incluyendo pre-releases) que contenga activos .mpp o .jar
-LATEST_PATCHES_TAG=$(gh api "repos/dh6k/morphe-patches/releases?per_page=10" | jq -r '
+section() {
+  echo "=========================================================="
+  echo "==> $1"
+  echo "=========================================================="
+}
+
+sanitize() {
+  printf '%s' "$1" | tr -d ' ' | tr '/' '-'
+}
+
+# Los valores multilínea (o con caracteres especiales) deben escribirse con el
+# formato heredoc de $GITHUB_OUTPUT; si no, el runner falla con
+# "Invalid format" y aborta el job.
+write_output() {
+  local key="$1"
+  local value="$2"
+  {
+    echo "${key}<<__OUTPUT_EOF__"
+    printf '%s\n' "$value"
+    echo "__OUTPUT_EOF__"
+  } >> "$GITHUB_OUTPUT"
+}
+
+# ------------------------------------------------------------------------------
+# 1. Parches dh6k/morphe-patches
+# ------------------------------------------------------------------------------
+section "1. Resolviendo dh6k/morphe-patches..."
+
+LATEST_PATCHES_TAG=$(gh api "repos/dh6k/morphe-patches/releases?per_page=20" | jq -r '
   map(select(.assets | any(.name | endswith(".mpp") or endswith(".jar")))) | first | .tag_name // empty
 ' 2>/dev/null || true)
 
-if [ -z "$LATEST_PATCHES_TAG" ] || [ "$LATEST_PATCHES_TAG" = "null" ]; then
+if [ -z "$LATEST_PATCHES_TAG" ]; then
   LATEST_PATCHES_TAG=$(gh api "repos/dh6k/morphe-patches/releases/latest" --jq '.tag_name // empty' 2>/dev/null || true)
 fi
 
 if [ -z "$LATEST_PATCHES_TAG" ] || [ "$LATEST_PATCHES_TAG" = "null" ]; then
-  echo "Error: No se pudo resolver una versión válida de dh6k/morphe-patches." >&2
+  echo "Error: no se pudo resolver una versión válida de dh6k/morphe-patches." >&2
   exit 1
 fi
+
 echo "Versión de parches: '$LATEST_PATCHES_TAG'"
 
-echo "=========================================================="
-echo "==> 2. Resolviendo versiones de Brave Browser..."
-echo "=========================================================="
-BRAVE_RELEASES_RAW=$(gh api "repos/brave/brave-browser/releases?per_page=30")
+# ------------------------------------------------------------------------------
+# 2. Versiones de Brave Browser
+# ------------------------------------------------------------------------------
+section "2. Resolviendo versiones de Brave Browser..."
+
+# per_page=100 para que Beta/Nightly no salgan de la ventana de resultados
+# (Brave publica Nightly con mucha frecuencia).
+BRAVE_RELEASES_RAW=$(gh api "repos/brave/brave-browser/releases?per_page=100")
 
 resolve_brave_tag() {
   local prefix="$1"
   local tag
-  tag=$(echo "$BRAVE_RELEASES_RAW" | jq -r --arg prefix "$prefix" '
+  tag=$(printf '%s' "$BRAVE_RELEASES_RAW" | jq -r --arg prefix "$prefix" '
     map(select((.name | startswith($prefix)) and (.assets | any(.name | endswith(".apk"))))) | first | .tag_name // empty
   ')
   if [ -z "$tag" ] || [ "$tag" = "null" ]; then
-    echo ""
+    printf ''
   else
-    echo "$tag"
+    printf '%s' "$tag"
   fi
 }
 
@@ -58,123 +88,209 @@ echo "Brave Beta:    ${BRAVE_BETA_TAG:-'(no detectado)'}"
 echo "Brave Nightly: ${BRAVE_NIGHTLY_TAG:-'(no detectado)'}"
 
 if [ -z "$BRAVE_STABLE_TAG" ]; then
-  echo "Error: No se pudo resolver la versión Stable de Brave Browser." >&2
+  echo "Error: no se pudo resolver la versión Stable de Brave Browser." >&2
   exit 1
 fi
 
-SAFE_STABLE_TAG=$(echo "$BRAVE_STABLE_TAG" | tr -d ' ' | tr '/' '-')
-SAFE_PATCHES_TAG=$(echo "$LATEST_PATCHES_TAG" | tr -d ' ' | tr '/' '-')
+# Si se pidió una variante concreta, debe existir. Nunca se sustituye por
+# Stable, porque produciría un APK mal etiquetado.
+case "$INPUT_VARIANT" in
+  Beta)
+    if [ -z "$BRAVE_BETA_TAG" ]; then
+      echo "Error: se pidió la variante Beta pero no hay release de Brave Beta con APKs." >&2
+      exit 1
+    fi
+    ;;
+  Nightly)
+    if [ -z "$BRAVE_NIGHTLY_TAG" ]; then
+      echo "Error: se pidió la variante Nightly pero no hay release de Brave Nightly con APKs." >&2
+      exit 1
+    fi
+    ;;
+esac
 
-# Configuración de tag y título de release
+SAFE_PATCHES_TAG=$(sanitize "$LATEST_PATCHES_TAG")
+SAFE_STABLE_TAG=$(sanitize "$BRAVE_STABLE_TAG")
+
+# ------------------------------------------------------------------------------
+# 3. Tag y título de la release
+# ------------------------------------------------------------------------------
+section "3. Resolviendo tag de release..."
+
 PRERELEASE="false"
+VARIANT_LABEL=""
+TITLE_VARIANT="Brave Browser"
+
+case "$INPUT_VARIANT" in
+  Beta)
+    TAG_CORE=$(sanitize "$BRAVE_BETA_TAG")
+    VARIANT_LABEL="-Beta"
+    TITLE_VARIANT="Brave Beta"
+    PRERELEASE="true"
+    ;;
+  Nightly)
+    TAG_CORE=$(sanitize "$BRAVE_NIGHTLY_TAG")
+    VARIANT_LABEL="-Nightly"
+    TITLE_VARIANT="Brave Nightly"
+    PRERELEASE="true"
+    ;;
+  *)
+    TAG_CORE="$SAFE_STABLE_TAG"
+    ;;
+esac
+
 if [ -n "$INPUT_APK_URL" ]; then
   RELEASE_TAG="brave-custom-$(date +'%Y%m%d%H%M%S')"
   RELEASE_TITLE="Brave Patched (Custom APK - $(date +'%Y-%m-%d'))"
-elif [ "$INPUT_VARIANT" = "Beta" ]; then
-  SAFE_TAG=$(echo "${BRAVE_BETA_TAG:-$BRAVE_STABLE_TAG}" | tr -d ' ' | tr '/' '-')
-  RELEASE_TAG="brave-Beta-${SAFE_TAG}-${SAFE_PATCHES_TAG}"
-  RELEASE_TITLE="Brave Beta ${BRAVE_BETA_TAG:-$BRAVE_STABLE_TAG} (${LATEST_PATCHES_TAG})"
-  PRERELEASE="true"
-elif [ "$INPUT_VARIANT" = "Nightly" ]; then
-  SAFE_TAG=$(echo "${BRAVE_NIGHTLY_TAG:-$BRAVE_STABLE_TAG}" | tr -d ' ' | tr '/' '-')
-  RELEASE_TAG="brave-Nightly-${SAFE_TAG}-${SAFE_PATCHES_TAG}"
-  RELEASE_TITLE="Brave Nightly ${BRAVE_NIGHTLY_TAG:-$BRAVE_STABLE_TAG} (${LATEST_PATCHES_TAG})"
-  PRERELEASE="true"
+  PRERELEASE="false"
 else
-  RELEASE_TAG="brave-${SAFE_STABLE_TAG}-${SAFE_PATCHES_TAG}"
-  RELEASE_TITLE="Brave Browser ${BRAVE_STABLE_TAG} (${LATEST_PATCHES_TAG})"
+  # Un build parcial (arquitectura o tema concretos) usa un tag propio para no
+  # sobrescribir las notas ni los checksums de la release completa.
+  SCOPE_LABEL=""
+  if [ "$INPUT_ARCH" != "all" ] || [ "$INPUT_THEME" != "all" ]; then
+    SCOPE_LABEL="-${INPUT_ARCH}-${INPUT_THEME}"
+  fi
+
+  RELEASE_TITLE="${TITLE_VARIANT} ${TAG_CORE} (${LATEST_PATCHES_TAG})"
+  if [ -n "$SCOPE_LABEL" ]; then
+    RELEASE_TITLE="${RELEASE_TITLE} [build parcial: ${INPUT_ARCH} - ${INPUT_THEME}]"
+  fi
+
+  RELEASE_TAG="brave${VARIANT_LABEL}-${TAG_CORE}-${SAFE_PATCHES_TAG}${SCOPE_LABEL}"
 fi
 
-# Comprobación de cambios en ejecución programada (cron)
-if [ "$EVENT_NAME" = "schedule" ]; then
-  echo "=========================================================="
-  echo "==> Verificando si ya existe release para: $RELEASE_TAG"
-  echo "=========================================================="
+echo "Tag:    $RELEASE_TAG"
+echo "Título: $RELEASE_TITLE"
+
+# ------------------------------------------------------------------------------
+# 4. ¿Hay algo nuevo que compilar? (solo cron)
+# ------------------------------------------------------------------------------
+if [ "$EVENT_NAME" = "schedule" ] && [ -n "$RELEASE_TAG" ]; then
+  section "4. Verificando si la release ya está al día..."
+
   if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-    RELEASE_BODY=$(gh release view "$RELEASE_TAG" --json body --jq '.body // ""' 2>/dev/null || echo "")
-    BETA_OK="true"
-    NIGHTLY_OK="true"
+    RELEASE_BODY=$(gh release view "$RELEASE_TAG" --json body --jq '.body // ""')
+    STALE="false"
 
-    if [ -n "$BRAVE_BETA_TAG" ] && ! echo "$RELEASE_BODY" | grep -q "$BRAVE_BETA_TAG"; then
-      echo "Nueva versión detectada para Brave Beta: $BRAVE_BETA_TAG"
-      BETA_OK="false"
+    # Las notas incluyen la versión efectiva de cada variante y la de parches.
+    # Se comparan con grep -F para evitar falsos positivos por regex.
+    for pair in "Stable:${BRAVE_STABLE_TAG}" "Beta:${BRAVE_BETA_TAG}" "Nightly:${BRAVE_NIGHTLY_TAG}"; do
+      label="${pair%%:*}"
+      current="${pair#*:}"
+      [ -n "$current" ] || continue
+      if ! printf '%s' "$RELEASE_BODY" | grep -Fq "$current"; then
+        echo "Nueva versión de Brave ${label}: $current"
+        STALE="true"
+      fi
+    done
+
+    if ! printf '%s' "$RELEASE_BODY" | grep -Fq "$LATEST_PATCHES_TAG"; then
+      echo "Nueva versión de parches: $LATEST_PATCHES_TAG"
+      STALE="true"
     fi
 
-    if [ -n "$BRAVE_NIGHTLY_TAG" ] && ! echo "$RELEASE_BODY" | grep -q "$BRAVE_NIGHTLY_TAG"; then
-      echo "Nueva versión detectada para Brave Nightly: $BRAVE_NIGHTLY_TAG"
-      NIGHTLY_OK="false"
-    fi
-
-    if [ "$BETA_OK" = "true" ] && [ "$NIGHTLY_OK" = "true" ]; then
-      echo "==> Todas las variantes (Stable, Beta, Nightly) y parches están al día en $RELEASE_TAG."
-      echo "==> Finalizando ejecución limpiamente."
-      echo "should_run=false" >> "$GITHUB_OUTPUT"
-      echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
+    if [ "$STALE" = "false" ]; then
+      echo "==> La release '$RELEASE_TAG' ya contiene todas las versiones actuales."
+      echo "==> No hay nada que compilar."
+      write_output "should_run" "false"
+      write_output "matrix" '{"include":[]}'
       exit 0
     fi
   fi
 fi
 
-# Construir la matriz de compilación
-# Nota: La matriz se paraleliza por (variante, arquitectura). Los temas (estándar y amoled)
-# se procesan en la misma leg para reutilizar la descarga de input.apk.
+# ------------------------------------------------------------------------------
+# 5. Matriz de compilación
+# ------------------------------------------------------------------------------
+section "5. Construyendo matriz de compilación..."
+
 VARIANTS=()
-if [ -n "$INPUT_APK_URL" ]; then
-  case "$INPUT_VARIANT" in
-    all|"") VARIANTS=("Stable") ;;
-    *) VARIANTS=("$INPUT_VARIANT") ;;
-  esac
-else
-  case "$INPUT_VARIANT" in
-    all|"") VARIANTS=("Stable" "Beta" "Nightly") ;;
-    *) VARIANTS=("$INPUT_VARIANT") ;;
-  esac
+case "$INPUT_VARIANT" in
+  all|"")
+    if [ -n "$INPUT_APK_URL" ]; then
+      # Un APK manual no permite distinguir la variante: se asume Stable.
+      VARIANTS=("Stable")
+    else
+      for v in Stable Beta Nightly; do
+        case "$v" in
+          Stable) current="$BRAVE_STABLE_TAG" ;;
+          Beta) current="$BRAVE_BETA_TAG" ;;
+          Nightly) current="$BRAVE_NIGHTLY_TAG" ;;
+        esac
+        if [ -n "$current" ]; then
+          VARIANTS+=("$v")
+        else
+          echo "Aviso: Brave $v no tiene release con APKs; se omite." >&2
+        fi
+      done
+    fi
+    ;;
+  *)
+    VARIANTS=("$INPUT_VARIANT")
+    ;;
+esac
+
+if [ ${#VARIANTS[@]} -eq 0 ]; then
+  echo "Error: no hay ninguna variante de Brave disponible para compilar." >&2
+  exit 1
 fi
 
 ARCHS=()
-case "$INPUT_ARCH" in
-  all|"") ARCHS=("armv8" "armv7" "universal") ;;
-  *) ARCHS=("$INPUT_ARCH") ;;
-esac
+if [ -n "$INPUT_APK_URL" ]; then
+  # Un APK manual es un único archivo: no tiene sentido generar legs por ABI.
+  ARCHS=("custom")
+else
+  case "$INPUT_ARCH" in
+    all|"") ARCHS=("armv8" "armv7" "universal") ;;
+    *) ARCHS=("$INPUT_ARCH") ;;
+  esac
+fi
 
-THEME_MODE="$INPUT_THEME"
-case "$THEME_MODE" in
-  standard|amoled|all) ;;
+case "$INPUT_THEME" in
+  standard|amoled) THEME_MODE="$INPUT_THEME" ;;
   *) THEME_MODE="all" ;;
 esac
 
 MATRIX_INCLUDES=()
 for v in "${VARIANTS[@]}"; do
-  # Asignar el tag exacto de Brave según la variante para evitar discrepancias
   case "$v" in
     Stable) BTAG="$BRAVE_STABLE_TAG" ;;
-    Beta) BTAG="${BRAVE_BETA_TAG:-$BRAVE_STABLE_TAG}" ;;
-    Nightly) BTAG="${BRAVE_NIGHTLY_TAG:-$BRAVE_STABLE_TAG}" ;;
+    Beta) BTAG="$BRAVE_BETA_TAG" ;;
+    Nightly) BTAG="$BRAVE_NIGHTLY_TAG" ;;
     *) BTAG="$BRAVE_STABLE_TAG" ;;
   esac
 
+  [ -n "$BTAG" ] || continue
+
   for a in "${ARCHS[@]}"; do
-    MATRIX_INCLUDES+=(
-      "{\"brave_variant\": \"$v\", \"architecture\": \"$a\", \"theme_mode\": \"$THEME_MODE\", \"brave_tag\": \"$BTAG\", \"apk_url\": \"$INPUT_APK_URL\"}"
-    )
+    # jq construye cada entrada para escapar correctamente valores arbitrarios
+    # (por ejemplo una URL con comillas).
+    MATRIX_INCLUDES+=("$(
+      jq -cn \
+        --arg variant "$v" \
+        --arg arch "$a" \
+        --arg theme "$THEME_MODE" \
+        --arg tag "$BTAG" \
+        --arg url "$INPUT_APK_URL" \
+        '{brave_variant: $variant, architecture: $arch, theme_mode: $theme, brave_tag: $tag, apk_url: $url}'
+    )")
   done
 done
 
-MATRIX_JSON=$(printf '%s\n' "${MATRIX_INCLUDES[@]}" | jq -s '{"include": .}')
+if [ ${#MATRIX_INCLUDES[@]} -eq 0 ]; then
+  echo "Error: la matriz quedó vacía." >&2
+  exit 1
+fi
 
-echo "=========================================================="
-echo "==> Matriz generada (${#MATRIX_INCLUDES[@]} legs):"
-echo "$MATRIX_JSON" | jq .
-echo "=========================================================="
+# -c es obligatorio: $GITHUB_OUTPUT no admite valores multilínea.
+MATRIX_JSON=$(printf '%s\n' "${MATRIX_INCLUDES[@]}" | jq -cs '{include: .}')
 
-{
-  echo "should_run=true"
-  echo "matrix=$MATRIX_JSON"
-  echo "release_tag=$RELEASE_TAG"
-  echo "release_title=$RELEASE_TITLE"
-  echo "prerelease=$PRERELEASE"
-  echo "patches_version=$LATEST_PATCHES_TAG"
-  echo "brave_stable_version=$BRAVE_STABLE_TAG"
-  echo "brave_beta_version=${BRAVE_BETA_TAG:-N/A}"
-  echo "brave_nightly_version=${BRAVE_NIGHTLY_TAG:-N/A}"
-} >> "$GITHUB_OUTPUT"
+echo "Matriz generada (${#MATRIX_INCLUDES[@]} legs):"
+printf '%s' "$MATRIX_JSON" | jq .
+
+write_output "should_run" "true"
+write_output "matrix" "$MATRIX_JSON"
+write_output "release_tag" "$RELEASE_TAG"
+write_output "release_title" "$RELEASE_TITLE"
+write_output "prerelease" "$PRERELEASE"
+write_output "patches_version" "$LATEST_PATCHES_TAG"
