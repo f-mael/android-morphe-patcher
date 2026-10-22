@@ -25,6 +25,15 @@ name: Patch Brave Browser
           - armv7
           - universal
         default: 'all'
+      theme:
+        description: 'Tema visual (Estándar o AMOLED puro)'
+        required: true
+        type: choice
+        options:
+          - all
+          - standard
+          - amoled
+        default: 'all'
       apk_url:
         description: 'URL directa opcional al APK de Brave (deja vacío para auto-detectar de releases)'
         required: false
@@ -57,6 +66,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_VARIANT: ${{ inputs.brave_variant }}
           INPUT_ARCH: ${{ inputs.architecture }}
+          INPUT_THEME: ${{ inputs.theme }}
           INPUT_APK_URL: ${{ inputs.apk_url }}
         run: |
           set -e
@@ -65,8 +75,11 @@ jobs:
           echo "==> Resolviendo versiones de Brave Browser y dh6k/morphe-patches..."
           echo "=========================================================="
 
-          # 1. Tag de última versión de parches dh6k
-          LATEST_PATCHES_TAG=$(gh api "repos/dh6k/morphe-patches/releases/latest" --jq .tag_name 2>/dev/null || echo "")
+          # 1. Tag de última versión de parches dh6k (incluyendo dev/pre-releases con bundle .mpp o .jar)
+          LATEST_PATCHES_TAG=$(gh api "repos/dh6k/morphe-patches/releases?per_page=10" | jq -r '
+            map(select(.assets | any(.name | endswith(".mpp") or endswith(".jar")))) | first | .tag_name
+          ' 2>/dev/null || echo "")
+
           [ -z "$LATEST_PATCHES_TAG" ] && LATEST_PATCHES_TAG="latest"
           echo "Último tag de dh6k/morphe-patches: '$LATEST_PATCHES_TAG'"
 
@@ -110,7 +123,7 @@ jobs:
               echo "==> No hay nuevas actualizaciones pendientes."
               echo "=========================================================="
               echo "should_run=false" >> "$GITHUB_OUTPUT"
-              echo "matrix={\"include\":[{\"brave_variant\":\"none\",\"architecture\":\"none\",\"apk_url\":\"\"}]}" >> "$GITHUB_OUTPUT"
+              echo "matrix={\"include\":[{\"brave_variant\":\"none\",\"architecture\":\"none\",\"theme\":\"none\",\"apk_url\":\"\"}]}" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             echo "==> Nueva versión detectada: procediendo con la compilación..."
@@ -122,11 +135,15 @@ jobs:
             [ "$V" = "all" ] || [ -z "$V" ] && V="Stable"
             A="$INPUT_ARCH"
             [ "$A" = "all" ] || [ -z "$A" ] && A="armv8"
+            T="$INPUT_THEME"
+            [ "$T" = "all" ] || [ -z "$T" ] && T="standard"
+
             MATRIX_JSON=$(jq -cn \
               --arg variant "$V" \
               --arg arch "$A" \
+              --arg theme "$T" \
               --arg url "$INPUT_APK_URL" \
-              '{"include": [{"brave_variant": $variant, "architecture": $arch, "apk_url": $url}]}')
+              '{"include": [{"brave_variant": $variant, "architecture": $arch, "theme": $theme, "apk_url": $url}]}')
           else
             VARIANTS=()
             if [ "$INPUT_VARIANT" = "all" ] || [ -z "$INPUT_VARIANT" ]; then
@@ -142,10 +159,19 @@ jobs:
               ARCHS=("$INPUT_ARCH")
             fi
 
+            THEMES=()
+            if [ "$INPUT_THEME" = "all" ] || [ -z "$INPUT_THEME" ]; then
+              THEMES=("standard" "amoled")
+            else
+              THEMES=("$INPUT_THEME")
+            fi
+
             MATRIX_INCLUDES=()
             for v in "${VARIANTS[@]}"; do
               for a in "${ARCHS[@]}"; do
-                MATRIX_INCLUDES+=( "{\"brave_variant\": \"$v\", \"architecture\": \"$a\", \"apk_url\": \"\"}" )
+                for t in "${THEMES[@]}"; do
+                  MATRIX_INCLUDES+=( "{\"brave_variant\": \"$v\", \"architecture\": \"$a\", \"theme\": \"$t\", \"apk_url\": \"\"}" )
+                done
               done
             done
 
@@ -164,7 +190,7 @@ jobs:
           echo "brave_version=$LATEST_BRAVE_TAG" >> "$GITHUB_OUTPUT"
 
   patch:
-    name: Patch Brave (${{ matrix.brave_variant }} - ${{ matrix.architecture }})
+    name: Patch Brave (${{ matrix.brave_variant }} - ${{ matrix.architecture }} - ${{ matrix.theme }})
     needs: check
     if: needs.check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
@@ -186,6 +212,7 @@ jobs:
         id: tools
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PATCHES_TAG: ${{ needs.check.outputs.patches_version }}
         run: |
           set -e
           mkdir -p tools
@@ -199,15 +226,16 @@ jobs:
           chmod +x tools/cli.jar
 
           echo "=========================================================="
-          echo "==> 2. Descargando bundle de parches dh6k/morphe-patches..."
+          echo "==> 2. Descargando bundle de parches dh6k/morphe-patches ($PATCHES_TAG)..."
           echo "=========================================================="
-          PATCHES_TAG=$(gh release view --repo dh6k/morphe-patches --json tagName --jq .tagName 2>/dev/null || echo "latest")
-          echo "patches_version=$PATCHES_TAG" >> "$GITHUB_OUTPUT"
-
-          if gh release download --repo dh6k/morphe-patches --pattern "*.jar" --dir tools 2>/dev/null; then
+          if gh release download "$PATCHES_TAG" --repo dh6k/morphe-patches --pattern "*.mpp" --dir tools 2>/dev/null; then
+            mv tools/*.mpp tools/patches.jar
+          elif gh release download "$PATCHES_TAG" --repo dh6k/morphe-patches --pattern "*.jar" --dir tools 2>/dev/null; then
             mv tools/*.jar tools/patches.jar
           elif gh release download --repo dh6k/morphe-patches --pattern "*.mpp" --dir tools 2>/dev/null; then
             mv tools/*.mpp tools/patches.jar
+          elif gh release download --repo dh6k/morphe-patches --pattern "*.jar" --dir tools 2>/dev/null; then
+            mv tools/*.jar tools/patches.jar
           else
             echo "Error: No se pudo obtener el bundle de parches de dh6k/morphe-patches" >&2
             exit 1
@@ -216,9 +244,12 @@ jobs:
           echo "=========================================================="
           echo "==> 3. Verificando/descargando integrations APK..."
           echo "=========================================================="
-          if gh release download --repo dh6k/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
+          if gh release download "$PATCHES_TAG" --repo dh6k/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
             mv tools/*.apk tools/integrations.apk
-            echo "Integrations APK descargado desde dh6k/morphe-patches."
+            echo "Integrations APK descargado desde release $PATCHES_TAG."
+          elif gh release download --repo dh6k/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
+            mv tools/*.apk tools/integrations.apk
+            echo "Integrations APK descargado desde latest dh6k/morphe-patches."
           elif gh release download --repo MorpheApp/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
             mv tools/*.apk tools/integrations.apk
             echo "Integrations APK descargado desde fallback MorpheApp/morphe-patches."
@@ -324,11 +355,17 @@ jobs:
           KEYSTORE_ENTRY_PASSWORD: ${{ secrets.KEYSTORE_ENTRY_PASSWORD }}
           BRAVE_VARIANT: ${{ matrix.brave_variant }}
           ARCH: ${{ matrix.architecture }}
+          THEME: ${{ matrix.theme }}
         run: |
           set -e
-          OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-patched.apk"
-          KEYSTORE_ARGS=()
 
+          if [ "$THEME" = "amoled" ]; then
+            OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-amoled-patched.apk"
+          else
+            OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-patched.apk"
+          fi
+
+          KEYSTORE_ARGS=()
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
             echo "==> Configurando keystore personalizado desde secretos..."
             mkdir -p certs
@@ -370,16 +407,43 @@ jobs:
           "
           fi
 
+          # Lista de parches base comunes
+          PATCH_ARGS=(
+            -e "Custom NTP wallpaper"
+            -O customWallpaper=assets/wallpaper.png
+            -e "Brave Origin"
+            -e "Brave Startup Performance Optimization"
+          )
+
+          # Evaluar compatibilidad de 'Brave NTP four-column tiles'
+          if java -jar tools/cli.jar list-patches --patches tools/patches.jar 2>/dev/null | grep -qi "four-column"; then
+            echo "==> Parche 'Brave NTP four-column tiles' detectado en el bundle; activando..."
+            PATCH_ARGS+=(-e "Brave NTP four-column tiles")
+          else
+            echo "==> Parche 'Brave NTP four-column tiles' no presente en este bundle; continuando."
+          fi
+
+          # Evaluar y aplicar 'Brave AMOLED theme' si corresponde
+          if [ "$THEME" = "amoled" ]; then
+            if java -jar tools/cli.jar list-patches --patches tools/patches.jar 2>/dev/null | grep -qi "AMOLED"; then
+              echo "==> Aplicando parche 'Brave AMOLED theme' (negro puro #000000)..."
+              PATCH_ARGS+=(
+                -e "Brave AMOLED theme"
+                -O backgroundColor="#000000"
+              )
+            else
+              echo "==> Advertencia: Variante AMOLED solicitada pero 'Brave AMOLED theme' no está disponible en este bundle."
+            fi
+          fi
+
           echo "=========================================================="
           echo "==> Ejecutando parcheo con Morphe CLI..."
+          echo "    Destino: $OUTPUT_APK"
+          echo "    Tema: $THEME"
           echo "=========================================================="
           java -jar tools/cli.jar patch \
             --patches tools/patches.jar \
-            -e "Custom NTP wallpaper" \
-            -O customWallpaper=assets/wallpaper.png \
-            -e "Mock Brave Origin Premium" \
-            -e "Brave Origin" \
-            -e "Brave Startup Performance Optimization" \
+            "${PATCH_ARGS[@]}" \
             ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
             ${KEYSTORE_ARGS[@]+"${KEYSTORE_ARGS[@]}"} \
             -o "$OUTPUT_APK" \
@@ -397,16 +461,23 @@ jobs:
         env:
           BRAVE_VARIANT: ${{ matrix.brave_variant }}
           ARCH: ${{ matrix.architecture }}
+          THEME: ${{ matrix.theme }}
           BRAVE_VERSION: ${{ steps.brave.outputs.brave_version }}
         run: |
           set -e
-          OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-patched.apk"
+          if [ "$THEME" = "amoled" ]; then
+            OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-amoled-patched.apk"
+          else
+            OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-patched.apk"
+          fi
+
           SHA256_HASH=$(sha256sum "$OUTPUT_APK" | awk '{print $1}')
           echo "${SHA256_HASH}  ${OUTPUT_APK}" > "${OUTPUT_APK}.sha256"
 
           cat <<EOF > "${OUTPUT_APK}.meta"
           variant: ${BRAVE_VARIANT}
           arch: ${ARCH}
+          theme: ${THEME}
           brave_version: ${BRAVE_VERSION}
           filename: ${OUTPUT_APK}
           sha256: ${SHA256_HASH}
@@ -417,7 +488,7 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ matrix.brave_variant }}-${{ matrix.architecture }}
+          name: apk-${{ matrix.brave_variant }}-${{ matrix.architecture }}-${{ matrix.theme }}
           path: |
             ${{ steps.meta.outputs.output_apk }}
             ${{ steps.meta.outputs.output_apk }}.sha256
@@ -468,7 +539,7 @@ jobs:
             SIGNING_STATUS="Firmado con keystore de depuración (Morphe CLI predeterminado)"
           fi
 
-          # Unificar checksums en un único archivo
+          # Consolidar todos los hashes en un único archivo
           cat release-assets/*.sha256 > release-assets/checksums.txt
 
           {
@@ -487,24 +558,33 @@ jobs:
             echo ""
             echo "## Paquetes APK disponibles"
             echo ""
-            echo "| Variante | Arquitectura | Versión Base | Archivo APK |"
-            echo "| :--- | :--- | :--- | :--- |"
+            echo "| Variante | Arquitectura | Tema | Versión Base | Archivo APK |"
+            echo "| :--- | :--- | :--- | :--- | :--- |"
 
             for meta in release-assets/*.meta; do
               [ -f "$meta" ] || continue
               VAR=$(grep '^[[:space:]]*variant:' "$meta" | head -n 1 | awk '{print $2}')
               ARCH=$(grep '^[[:space:]]*arch:' "$meta" | head -n 1 | awk '{print $2}')
+              THM=$(grep '^[[:space:]]*theme:' "$meta" | head -n 1 | awk '{print $2}')
               BVER=$(grep '^[[:space:]]*brave_version:' "$meta" | head -n 1 | awk '{print $2}')
               FNAME=$(grep '^[[:space:]]*filename:' "$meta" | head -n 1 | awk '{print $2}')
-              echo "| **${VAR}** | \`${ARCH}\` | \`${BVER}\` | \`${FNAME}\` |"
+
+              THEME_LABEL="Estándar"
+              if [ "$THM" = "amoled" ]; then
+                THEME_LABEL="🖤 AMOLED"
+              fi
+
+              echo "| **${VAR}** | \`${ARCH}\` | ${THEME_LABEL} | \`${BVER}\` | \`${FNAME}\` |"
             done
 
             echo ""
-            echo "## Parches aplicados"
+            echo "## Parches de Brave aplicados"
             echo ""
-            echo "- **Custom NTP wallpaper**: Soporte para fondos de pantalla personalizados en la nueva pestaña (NTP)."
-            echo "- **Mock Brave Origin Premium / Brave Origin**: Desbloqueo de opciones de Brave Origin y limpieza de telemetría."
-            echo "- **Brave Startup Performance Optimization**: Optimización de arranque eliminando latencia de inicialización OEM."
+            echo "- **Brave Origin**: Desbloqueo de opciones de Brave Origin y controles avanzados de funciones."
+            echo "- **Brave Startup Performance Optimization**: Eliminación de comprobaciones y latencia OEM en el arranque."
+            echo "- **Custom NTP wallpaper**: Integración de fondo de pantalla personalizado en la Nueva Pestaña (NTP)."
+            echo "- **Brave NTP four-column tiles**: Mantiene las tarjetas de sitios frecuentes en cuadrícula de 4 columnas descendente incluso con fondo activado."
+            echo "- **Brave AMOLED theme** *(variantes AMOLED)*: Reescribe las superficies oscuras a negro puro OLED (\`#000000\`) y desactiva Material You dynamic colors."
             echo ""
             echo "## Integridad de los binarios (SHA-256)"
             echo ""
