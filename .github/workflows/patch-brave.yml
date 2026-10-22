@@ -10,19 +10,21 @@ name: Patch Brave Browser
         required: true
         type: choice
         options:
+          - all
           - Stable
           - Beta
           - Nightly
-        default: 'Stable'
+        default: 'all'
       architecture:
         description: 'Arquitectura de destino'
         required: true
         type: choice
         options:
+          - all
           - armv8
           - armv7
           - universal
-        default: 'armv8'
+        default: 'all'
       apk_url:
         description: 'URL directa opcional al APK de Brave (deja vacío para auto-detectar de releases)'
         required: false
@@ -39,6 +41,11 @@ jobs:
     outputs:
       should_run: ${{ steps.resolve.outputs.should_run }}
       matrix: ${{ steps.resolve.outputs.matrix }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_title: ${{ steps.resolve.outputs.release_title }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+      patches_version: ${{ steps.resolve.outputs.patches_version }}
+      brave_version: ${{ steps.resolve.outputs.brave_version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -54,79 +61,113 @@ jobs:
         run: |
           set -e
 
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "==> Ejecución manual (workflow_dispatch) detectada."
-            echo "==> Compilando variante elegida: $INPUT_VARIANT ($INPUT_ARCH)"
+          echo "=========================================================="
+          echo "==> Resolviendo versiones de Brave Browser y dh6k/morphe-patches..."
+          echo "=========================================================="
 
-            MATRIX_JSON=$(jq -cn \
-              --arg variant "$INPUT_VARIANT" \
-              --arg arch "$INPUT_ARCH" \
-              --arg url "$INPUT_APK_URL" \
-              '{"include": [{"brave_variant": $variant, "architecture": $arch, "apk_url": $url}]}')
-
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-            echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "==> Ejecución programada (schedule / cron) detectada."
-          echo "==> Verificando actualizaciones en Brave Browser y dh6k/morphe-patches..."
-
-          # 1. Obtener tag de última versión de parches dh6k
+          # 1. Tag de última versión de parches dh6k
           LATEST_PATCHES_TAG=$(gh api "repos/dh6k/morphe-patches/releases/latest" --jq .tag_name 2>/dev/null || echo "")
+          [ -z "$LATEST_PATCHES_TAG" ] && LATEST_PATCHES_TAG="latest"
           echo "Último tag de dh6k/morphe-patches: '$LATEST_PATCHES_TAG'"
 
-          # 2. Obtener tag de última release estable oficial de Brave con APKs
-          LATEST_BRAVE_TAG=$(gh api "repos/brave/brave-browser/releases?per_page=30" | jq -r '
-            map(select((.name | startswith("Release ")) and (.assets | any(.name | endswith(".apk"))))) | first | .tag_name
-          ' 2>/dev/null || echo "")
-          echo "Último tag estable de Brave Browser: '$LATEST_BRAVE_TAG'"
+          # 2. Tag de versión de Brave
+          BRAVE_SEARCH_PREFIX="Release "
+          if [ "$INPUT_VARIANT" = "Beta" ]; then
+            BRAVE_SEARCH_PREFIX="Beta "
+          elif [ "$INPUT_VARIANT" = "Nightly" ]; then
+            BRAVE_SEARCH_PREFIX="Nightly "
+          fi
 
-          # 3. Obtener releases previas de este repositorio
-          EXISTING_TAGS=$(gh release list --limit 30 --json tagName --jq '.[].tagName' 2>/dev/null || echo "")
+          LATEST_BRAVE_TAG=$(gh api "repos/brave/brave-browser/releases?per_page=30" | jq -r --arg prefix "$BRAVE_SEARCH_PREFIX" '
+            map(select((.name | startswith($prefix)) and (.assets | any(.name | endswith(".apk"))))) | first | .tag_name
+          ' 2>/dev/null || echo "")
+          [ -z "$LATEST_BRAVE_TAG" ] && LATEST_BRAVE_TAG="latest"
+          echo "Tag de referencia de Brave Browser ($BRAVE_SEARCH_PREFIX): '$LATEST_BRAVE_TAG'"
 
           SAFE_BRAVE_TAG=$(echo "$LATEST_BRAVE_TAG" | tr -d ' ' | tr '/' '-')
           SAFE_PATCHES_TAG=$(echo "$LATEST_PATCHES_TAG" | tr -d ' ' | tr '/' '-')
 
-          echo "Verificando si ya existen releases para Brave ($SAFE_BRAVE_TAG) y parches ($SAFE_PATCHES_TAG)..."
-
-          if [ -n "$SAFE_BRAVE_TAG" ] && [ -n "$SAFE_PATCHES_TAG" ] && \
-             echo "$EXISTING_TAGS" | grep -q "$SAFE_BRAVE_TAG" && \
-             echo "$EXISTING_TAGS" | grep -q "$SAFE_PATCHES_TAG"; then
-            echo "=========================================================="
-            echo "==> No hay cambios ni actualizaciones de Brave ni de los parches."
-            echo "==> Cancelando ejecución limpiamente sin gastar minutos de Action."
-            echo "=========================================================="
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "matrix={\"include\":[{\"brave_variant\":\"none\",\"architecture\":\"none\",\"apk_url\":\"\"}]}" >> "$GITHUB_OUTPUT"
-            exit 0
+          # Determinar Tag y Título de Release unificada
+          PRERELEASE="false"
+          if [ -n "$INPUT_APK_URL" ]; then
+            RELEASE_TAG="brave-custom-$(date +'%Y%m%d%H%M%S')"
+            RELEASE_TITLE="Brave Patched (Custom APK - $(date +'%Y-%m-%d'))"
+          elif [ "$INPUT_VARIANT" = "Beta" ] || [ "$INPUT_VARIANT" = "Nightly" ]; then
+            RELEASE_TAG="brave-${INPUT_VARIANT}-${SAFE_BRAVE_TAG}-${SAFE_PATCHES_TAG}"
+            RELEASE_TITLE="Brave ${INPUT_VARIANT} ${LATEST_BRAVE_TAG} (${LATEST_PATCHES_TAG})"
+            PRERELEASE="true"
+          else
+            RELEASE_TAG="brave-${SAFE_BRAVE_TAG}-${SAFE_PATCHES_TAG}"
+            RELEASE_TITLE="Brave Browser ${LATEST_BRAVE_TAG} (${LATEST_PATCHES_TAG})"
           fi
 
-          echo "==> Nuevas actualizaciones detectadas o compilación pendiente. Generando matriz completa..."
-          MATRIX_JSON=$(jq -cn '{
-            "include": [
-              {"brave_variant": "Stable", "architecture": "armv8", "apk_url": ""},
-              {"brave_variant": "Stable", "architecture": "armv7", "apk_url": ""},
-              {"brave_variant": "Stable", "architecture": "universal", "apk_url": ""},
-              {"brave_variant": "Beta", "architecture": "armv8", "apk_url": ""},
-              {"brave_variant": "Beta", "architecture": "armv7", "apk_url": ""},
-              {"brave_variant": "Beta", "architecture": "universal", "apk_url": ""},
-              {"brave_variant": "Nightly", "architecture": "armv8", "apk_url": ""},
-              {"brave_variant": "Nightly", "architecture": "armv7", "apk_url": ""},
-              {"brave_variant": "Nightly", "architecture": "universal", "apk_url": ""}
-            ]
-          }')
+          # Si es ejecución automática por schedule (cron), verificar si la release ya existe
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            echo "Verificando si la release unificada '$RELEASE_TAG' ya existe..."
+            if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+              echo "=========================================================="
+              echo "==> La release '$RELEASE_TAG' ya existe en el repositorio."
+              echo "==> No hay nuevas actualizaciones pendientes."
+              echo "=========================================================="
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "matrix={\"include\":[{\"brave_variant\":\"none\",\"architecture\":\"none\",\"apk_url\":\"\"}]}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "==> Nueva versión detectada: procediendo con la compilación..."
+          fi
+
+          # Construir matriz de compilación
+          if [ -n "$INPUT_APK_URL" ]; then
+            V="$INPUT_VARIANT"
+            [ "$V" = "all" ] || [ -z "$V" ] && V="Stable"
+            A="$INPUT_ARCH"
+            [ "$A" = "all" ] || [ -z "$A" ] && A="armv8"
+            MATRIX_JSON=$(jq -cn \
+              --arg variant "$V" \
+              --arg arch "$A" \
+              --arg url "$INPUT_APK_URL" \
+              '{"include": [{"brave_variant": $variant, "architecture": $arch, "apk_url": $url}]}')
+          else
+            VARIANTS=()
+            if [ "$INPUT_VARIANT" = "all" ] || [ -z "$INPUT_VARIANT" ]; then
+              VARIANTS=("Stable" "Beta" "Nightly")
+            else
+              VARIANTS=("$INPUT_VARIANT")
+            fi
+
+            ARCHS=()
+            if [ "$INPUT_ARCH" = "all" ] || [ -z "$INPUT_ARCH" ]; then
+              ARCHS=("armv8" "armv7" "universal")
+            else
+              ARCHS=("$INPUT_ARCH")
+            fi
+
+            MATRIX_INCLUDES=()
+            for v in "${VARIANTS[@]}"; do
+              for a in "${ARCHS[@]}"; do
+                MATRIX_INCLUDES+=( "{\"brave_variant\": \"$v\", \"architecture\": \"$a\", \"apk_url\": \"\"}" )
+              done
+            done
+
+            MATRIX_JSON=$(printf '%s\n' "${MATRIX_INCLUDES[@]}" | jq -s '{"include": .}')
+          fi
+
+          echo "Matriz resuelta:"
+          echo "$MATRIX_JSON" | jq .
 
           echo "should_run=true" >> "$GITHUB_OUTPUT"
           echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "release_title=$RELEASE_TITLE" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "patches_version=$LATEST_PATCHES_TAG" >> "$GITHUB_OUTPUT"
+          echo "brave_version=$LATEST_BRAVE_TAG" >> "$GITHUB_OUTPUT"
 
   patch:
-    name: Patch & Release Brave (${{ matrix.brave_variant }} - ${{ matrix.architecture }})
+    name: Patch Brave (${{ matrix.brave_variant }} - ${{ matrix.architecture }})
     needs: check
     if: needs.check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.check.outputs.matrix) }}
@@ -238,7 +279,6 @@ jobs:
             echo "Release seleccionada: $RELEASE_TAG"
             BRAVE_TAG="$RELEASE_TAG"
 
-            # Identificar el activo APK para la arquitectura
             ASSET_NAME=$(gh api "repos/brave/brave-browser/releases/tags/$RELEASE_TAG" | jq -r --arg arch "$ARCH" '
               .assets | map(select(.name | endswith(".apk"))) as $apks |
               (
@@ -289,7 +329,6 @@ jobs:
           OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-patched.apk"
           KEYSTORE_ARGS=()
 
-          # Configurar keystore si está presente en los secretos
           if [ -n "${KEYSTORE_BASE64:-}" ]; then
             echo "==> Configurando keystore personalizado desde secretos..."
             mkdir -p certs
@@ -304,7 +343,6 @@ jobs:
             echo "==> No se detectó KEYSTORE_BASE64. Morphe CLI usará el keystore de depuración por defecto."
           fi
 
-          # Evaluar compatibilidad de --merge
           MERGE_ARGS=()
           if [ -f "tools/integrations.apk" ]; then
             if java -jar tools/cli.jar patch --help 2>&1 | grep -q -- "--merge"; then
@@ -315,7 +353,6 @@ jobs:
             fi
           fi
 
-          # Asegurar existencia de archivo de fondo de pantalla para el parche
           WALLPAPER_FILE="assets/wallpaper.png"
           if [ ! -f "$WALLPAPER_FILE" ]; then
             mkdir -p assets
@@ -351,27 +388,79 @@ jobs:
           rm -rf certs
 
           echo "=========================================================="
-          echo "==> APK parcheado exitosamente:"
+          echo "==> APK parcheado exitosamente: $OUTPUT_APK"
           ls -lh "$OUTPUT_APK"
           echo "=========================================================="
 
-      - name: Generate Release Notes and Metadata
-        id: release_meta
+      - name: Generate Checksum & Metadata
+        id: meta
         env:
           BRAVE_VARIANT: ${{ matrix.brave_variant }}
           ARCH: ${{ matrix.architecture }}
           BRAVE_VERSION: ${{ steps.brave.outputs.brave_version }}
-          PATCHES_VERSION: ${{ steps.tools.outputs.patches_version }}
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           set -e
           OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-patched.apk"
           SHA256_HASH=$(sha256sum "$OUTPUT_APK" | awk '{print $1}')
-          BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          echo "${SHA256_HASH}  ${OUTPUT_APK}" > "${OUTPUT_APK}.sha256"
 
-          SAFE_BRAVE_TAG=$(echo "$BRAVE_VERSION" | tr -d ' ' | tr '/' '-')
-          SAFE_PATCHES_TAG=$(echo "$PATCHES_VERSION" | tr -d ' ' | tr '/' '-')
-          TAG_NAME="brave-${BRAVE_VARIANT}-${ARCH}-${SAFE_BRAVE_TAG}-${SAFE_PATCHES_TAG}"
+          cat <<EOF > "${OUTPUT_APK}.meta"
+          variant: ${BRAVE_VARIANT}
+          arch: ${ARCH}
+          brave_version: ${BRAVE_VERSION}
+          filename: ${OUTPUT_APK}
+          sha256: ${SHA256_HASH}
+          EOF
+
+          echo "output_apk=$OUTPUT_APK" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ matrix.brave_variant }}-${{ matrix.architecture }}
+          path: |
+            ${{ steps.meta.outputs.output_apk }}
+            ${{ steps.meta.outputs.output_apk }}.sha256
+            ${{ steps.meta.outputs.output_apk }}.meta
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish Unified Release
+    needs: [check, patch]
+    if: |
+      !cancelled() &&
+      needs.check.outputs.should_run == 'true' &&
+      (needs.patch.result == 'success' || needs.patch.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Build Unified Release Notes
+        id: notes
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          PATCHES_VERSION: ${{ needs.check.outputs.patches_version }}
+          BRAVE_VERSION: ${{ needs.check.outputs.brave_version }}
+        run: |
+          set -e
+
+          if ! compgen -G "release-assets/*.apk" > /dev/null; then
+            echo "Error: No se encontró ningún archivo APK descargado." >&2
+            exit 1
+          fi
+
+          BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
 
           if [ -n "$KEYSTORE_BASE64" ]; then
             SIGNING_STATUS="Firmado con keystore personalizado (persistente)"
@@ -379,75 +468,90 @@ jobs:
             SIGNING_STATUS="Firmado con keystore de depuración (Morphe CLI predeterminado)"
           fi
 
+          # Unificar checksums en un único archivo
+          cat release-assets/*.sha256 > release-assets/checksums.txt
+
           {
-            echo "# Brave Browser (${BRAVE_VARIANT} - ${ARCH})"
+            echo "# Brave Browser Android (Morphe Patched)"
             echo ""
-            echo "Compilación automatizada de Brave Browser para Android parcheado con parches de dh6k/morphe-patches."
+            echo "Compilaciones automatizadas de Brave Browser para Android parcheadas con parches de [dh6k/morphe-patches](https://github.com/dh6k/morphe-patches)."
             echo ""
-            echo "## Información de la compilación"
+            echo "## Información de la versión"
             echo ""
             echo "| Parámetro | Valor |"
             echo "| :--- | :--- |"
-            echo "| **Versión base de Brave** | \`${BRAVE_VERSION}\` |"
+            echo "| **Versión base (Stable)** | \`${BRAVE_VERSION}\` |"
             echo "| **Versión dh6k/morphe-patches** | \`${PATCHES_VERSION}\` |"
-            echo "| **Arquitectura** | \`${ARCH}\` |"
             echo "| **Estado de firma** | ${SIGNING_STATUS} |"
             echo "| **Fecha de compilación** | \`${BUILD_DATE}\` |"
+            echo ""
+            echo "## Paquetes APK disponibles"
+            echo ""
+            echo "| Variante | Arquitectura | Versión Base | Archivo APK |"
+            echo "| :--- | :--- | :--- | :--- |"
+
+            for meta in release-assets/*.meta; do
+              [ -f "$meta" ] || continue
+              VAR=$(grep '^[[:space:]]*variant:' "$meta" | head -n 1 | awk '{print $2}')
+              ARCH=$(grep '^[[:space:]]*arch:' "$meta" | head -n 1 | awk '{print $2}')
+              BVER=$(grep '^[[:space:]]*brave_version:' "$meta" | head -n 1 | awk '{print $2}')
+              FNAME=$(grep '^[[:space:]]*filename:' "$meta" | head -n 1 | awk '{print $2}')
+              echo "| **${VAR}** | \`${ARCH}\` | \`${BVER}\` | \`${FNAME}\` |"
+            done
+
             echo ""
             echo "## Parches aplicados"
             echo ""
             echo "- **Custom NTP wallpaper**: Soporte para fondos de pantalla personalizados en la nueva pestaña (NTP)."
-            echo "- **Brave Origin**: Desbloqueo de opciones de Brave Origin y limpieza de telemetría/componentes innecesarios."
+            echo "- **Mock Brave Origin Premium / Brave Origin**: Desbloqueo de opciones de Brave Origin y limpieza de telemetría."
             echo "- **Brave Startup Performance Optimization**: Optimización de arranque eliminando latencia de inicialización OEM."
             echo ""
-            echo "## Integridad del binario (SHA-256)"
+            echo "## Integridad de los binarios (SHA-256)"
             echo ""
             echo '```text'
-            echo "${SHA256_HASH}  ${OUTPUT_APK}"
+            cat release-assets/checksums.txt
             echo '```'
           } > release_notes.md
 
-          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
-          echo "output_apk=$OUTPUT_APK" >> "$GITHUB_OUTPUT"
+          echo "=========================================================="
+          echo "Release Notes unificadas generadas:"
+          echo "=========================================================="
+          cat release_notes.md
 
       - name: Publish to GitHub Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ steps.release_meta.outputs.tag_name }}
-          OUTPUT_APK: ${{ steps.release_meta.outputs.output_apk }}
-          BRAVE_VARIANT: ${{ matrix.brave_variant }}
-          ARCH: ${{ matrix.architecture }}
-          BRAVE_VERSION: ${{ steps.brave.outputs.brave_version }}
+          TAG_NAME: ${{ needs.check.outputs.release_tag }}
+          RELEASE_TITLE: ${{ needs.check.outputs.release_title }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
         run: |
           set -e
-          RELEASE_TITLE="Brave ${BRAVE_VARIANT} (${ARCH}) - ${BRAVE_VERSION}"
+          echo "=========================================================="
+          echo "==> Publicando release unificada en GitHub Releases"
+          echo "    Tag: $TAG_NAME"
+          echo "    Title: $RELEASE_TITLE"
+          echo "=========================================================="
+
           PRERELEASE_FLAG=""
-          if [ "$BRAVE_VARIANT" != "Stable" ]; then
+          if [ "$PRERELEASE" = "true" ]; then
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          echo "=========================================================="
-          echo "==> Publicando en GitHub Releases con tag: $TAG_NAME"
-          echo "=========================================================="
+          FILES_TO_UPLOAD=( release-assets/*.apk release-assets/checksums.txt )
 
-          # Si el tag o release ya existía previamente, actualizar y sobreescribir binarios con --clobber
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            echo "La release '$TAG_NAME' ya existe en el repositorio. Actualizando con --clobber..."
+            echo "La release '$TAG_NAME' ya existía. Actualizando notas y subiendo binarios con --clobber..."
             gh release edit "$TAG_NAME" --title "$RELEASE_TITLE" --notes-file release_notes.md $PRERELEASE_FLAG || true
-            gh release upload "$TAG_NAME" "$OUTPUT_APK" --clobber
+            gh release upload "$TAG_NAME" "${FILES_TO_UPLOAD[@]}" --clobber
           else
-            echo "Creando nueva release para tag '$TAG_NAME'..."
-            gh release create "$TAG_NAME" "$OUTPUT_APK" \
+            echo "Creando nueva release única '$TAG_NAME' con todos los APKs..."
+            gh release create "$TAG_NAME" "${FILES_TO_UPLOAD[@]}" \
               --title "$RELEASE_TITLE" \
               --notes-file release_notes.md \
-              $PRERELEASE_FLAG 2>/dev/null || \
-            (
-              echo "Aviso: El tag ya existía previamente. Actualizando y subiendo binario con --clobber..."
-              gh release edit "$TAG_NAME" --title "$RELEASE_TITLE" --notes-file release_notes.md $PRERELEASE_FLAG || true
-              gh release upload "$TAG_NAME" "$OUTPUT_APK" --clobber
-            )
+              --target "${GITHUB_REF_NAME:-main}" \
+              $PRERELEASE_FLAG
           fi
 
           echo "=========================================================="
-          echo "==> Publicación completada exitosamente."
+          echo "==> Publicación de release unificada completada con éxito."
           echo "=========================================================="
