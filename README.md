@@ -16,7 +16,7 @@ Compilaciones automatizadas de **Brave Browser** para Android parcheadas con **M
   3. **Custom NTP wallpaper**: Integración de fondo personalizado en la Nueva Pestaña (`assets/wallpaper.png`).
   4. **Brave NTP four-column tiles**: Conserva los accesos rápidos en cuadrícula de 4 columnas descendente aun con fondo activo.
   5. **Brave AMOLED theme** *(variante AMOLED)*: Fondo negro puro `#000000` y desactivación de dynamic colors.
-- **Entregas automáticas unificadas**: Generación periódica (cada 12 horas) y firma de todos los APKs en una única release en la sección de [Releases](../../releases).
+- **Entregas automáticas unificadas**: Generación periódica (cada 24 horas) y firma de todos los APKs en una única release en la sección de [Releases](../../releases).
 
 > [!NOTE]
 > Las notas de cada release indican los parches **realmente aplicados**. Si un parche deja de ser compatible con una versión nueva de Brave, se omite, se registra como advertencia y el resto de la compilación continúa. La release falla si no se aplica ningún parche o si se pidió la variante AMOLED y su parche no está disponible.
