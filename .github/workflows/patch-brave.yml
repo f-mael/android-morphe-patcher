@@ -40,13 +40,22 @@ name: Patch Brave Browser
         type: string
         default: ''
 
+concurrency:
+  group: brave-release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
-  contents: write
+  contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   check:
     name: Check Updates & Resolve Matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       should_run: ${{ steps.resolve.outputs.should_run }}
       matrix: ${{ steps.resolve.outputs.matrix }}
@@ -54,12 +63,14 @@ jobs:
       release_title: ${{ steps.resolve.outputs.release_title }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
       patches_version: ${{ steps.resolve.outputs.patches_version }}
-      brave_version: ${{ steps.resolve.outputs.brave_version }}
+      brave_stable_version: ${{ steps.resolve.outputs.brave_stable_version }}
+      brave_beta_version: ${{ steps.resolve.outputs.brave_beta_version }}
+      brave_nightly_version: ${{ steps.resolve.outputs.brave_nightly_version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check updates and resolve build matrix
+      - name: Resolve matrix and versions
         id: resolve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -68,132 +79,43 @@ jobs:
           INPUT_ARCH: ${{ inputs.architecture }}
           INPUT_THEME: ${{ inputs.theme }}
           INPUT_APK_URL: ${{ inputs.apk_url }}
-        run: |
-          set -e
+        run: bash scripts/resolve-matrix.sh
 
-          echo "=========================================================="
-          echo "==> Resolviendo versiones de Brave Browser y dh6k/morphe-patches..."
-          echo "=========================================================="
-
-          # 1. Tag de última versión de parches dh6k (incluyendo dev/pre-releases con bundle .mpp o .jar)
-          LATEST_PATCHES_TAG=$(gh api "repos/dh6k/morphe-patches/releases?per_page=10" | jq -r '
-            map(select(.assets | any(.name | endswith(".mpp") or endswith(".jar")))) | first | .tag_name
-          ' 2>/dev/null || echo "")
-
-          [ -z "$LATEST_PATCHES_TAG" ] && LATEST_PATCHES_TAG="latest"
-          echo "Último tag de dh6k/morphe-patches: '$LATEST_PATCHES_TAG'"
-
-          # 2. Tag de versión de Brave
-          BRAVE_SEARCH_PREFIX="Release "
-          if [ "$INPUT_VARIANT" = "Beta" ]; then
-            BRAVE_SEARCH_PREFIX="Beta "
-          elif [ "$INPUT_VARIANT" = "Nightly" ]; then
-            BRAVE_SEARCH_PREFIX="Nightly "
-          fi
-
-          LATEST_BRAVE_TAG=$(gh api "repos/brave/brave-browser/releases?per_page=30" | jq -r --arg prefix "$BRAVE_SEARCH_PREFIX" '
-            map(select((.name | startswith($prefix)) and (.assets | any(.name | endswith(".apk"))))) | first | .tag_name
-          ' 2>/dev/null || echo "")
-          [ -z "$LATEST_BRAVE_TAG" ] && LATEST_BRAVE_TAG="latest"
-          echo "Tag de referencia de Brave Browser ($BRAVE_SEARCH_PREFIX): '$LATEST_BRAVE_TAG'"
-
-          SAFE_BRAVE_TAG=$(echo "$LATEST_BRAVE_TAG" | tr -d ' ' | tr '/' '-')
-          SAFE_PATCHES_TAG=$(echo "$LATEST_PATCHES_TAG" | tr -d ' ' | tr '/' '-')
-
-          # Determinar Tag y Título de Release unificada
-          PRERELEASE="false"
-          if [ -n "$INPUT_APK_URL" ]; then
-            RELEASE_TAG="brave-custom-$(date +'%Y%m%d%H%M%S')"
-            RELEASE_TITLE="Brave Patched (Custom APK - $(date +'%Y-%m-%d'))"
-          elif [ "$INPUT_VARIANT" = "Beta" ] || [ "$INPUT_VARIANT" = "Nightly" ]; then
-            RELEASE_TAG="brave-${INPUT_VARIANT}-${SAFE_BRAVE_TAG}-${SAFE_PATCHES_TAG}"
-            RELEASE_TITLE="Brave ${INPUT_VARIANT} ${LATEST_BRAVE_TAG} (${LATEST_PATCHES_TAG})"
-            PRERELEASE="true"
-          else
-            RELEASE_TAG="brave-${SAFE_BRAVE_TAG}-${SAFE_PATCHES_TAG}"
-            RELEASE_TITLE="Brave Browser ${LATEST_BRAVE_TAG} (${LATEST_PATCHES_TAG})"
-          fi
-
-          # Si es ejecución automática por schedule (cron), verificar si la release ya existe
-          if [ "$EVENT_NAME" = "schedule" ]; then
-            echo "Verificando si la release unificada '$RELEASE_TAG' ya existe..."
-            if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-              echo "=========================================================="
-              echo "==> La release '$RELEASE_TAG' ya existe en el repositorio."
-              echo "==> No hay nuevas actualizaciones pendientes."
-              echo "=========================================================="
-              echo "should_run=false" >> "$GITHUB_OUTPUT"
-              echo "matrix={\"include\":[{\"brave_variant\":\"none\",\"architecture\":\"none\",\"theme\":\"none\",\"apk_url\":\"\"}]}" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "==> Nueva versión detectada: procediendo con la compilación..."
-          fi
-
-          # Construir matriz de compilación
-          if [ -n "$INPUT_APK_URL" ]; then
-            V="$INPUT_VARIANT"
-            [ "$V" = "all" ] || [ -z "$V" ] && V="Stable"
-            A="$INPUT_ARCH"
-            [ "$A" = "all" ] || [ -z "$A" ] && A="armv8"
-            T="$INPUT_THEME"
-            [ "$T" = "all" ] || [ -z "$T" ] && T="standard"
-
-            MATRIX_JSON=$(jq -cn \
-              --arg variant "$V" \
-              --arg arch "$A" \
-              --arg theme "$T" \
-              --arg url "$INPUT_APK_URL" \
-              '{"include": [{"brave_variant": $variant, "architecture": $arch, "theme": $theme, "apk_url": $url}]}')
-          else
-            VARIANTS=()
-            if [ "$INPUT_VARIANT" = "all" ] || [ -z "$INPUT_VARIANT" ]; then
-              VARIANTS=("Stable" "Beta" "Nightly")
-            else
-              VARIANTS=("$INPUT_VARIANT")
-            fi
-
-            ARCHS=()
-            if [ "$INPUT_ARCH" = "all" ] || [ -z "$INPUT_ARCH" ]; then
-              ARCHS=("armv8" "armv7" "universal")
-            else
-              ARCHS=("$INPUT_ARCH")
-            fi
-
-            THEMES=()
-            if [ "$INPUT_THEME" = "all" ] || [ -z "$INPUT_THEME" ]; then
-              THEMES=("standard" "amoled")
-            else
-              THEMES=("$INPUT_THEME")
-            fi
-
-            MATRIX_INCLUDES=()
-            for v in "${VARIANTS[@]}"; do
-              for a in "${ARCHS[@]}"; do
-                for t in "${THEMES[@]}"; do
-                  MATRIX_INCLUDES+=( "{\"brave_variant\": \"$v\", \"architecture\": \"$a\", \"theme\": \"$t\", \"apk_url\": \"\"}" )
-                done
-              done
-            done
-
-            MATRIX_JSON=$(printf '%s\n' "${MATRIX_INCLUDES[@]}" | jq -s '{"include": .}')
-          fi
-
-          echo "Matriz resuelta:"
-          echo "$MATRIX_JSON" | jq .
-
-          echo "should_run=true" >> "$GITHUB_OUTPUT"
-          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "release_title=$RELEASE_TITLE" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
-          echo "patches_version=$LATEST_PATCHES_TAG" >> "$GITHUB_OUTPUT"
-          echo "brave_version=$LATEST_BRAVE_TAG" >> "$GITHUB_OUTPUT"
-
-  patch:
-    name: Patch Brave (${{ matrix.brave_variant }} - ${{ matrix.architecture }} - ${{ matrix.theme }})
+  prepare:
+    name: Prepare Tools & Patches
     needs: check
     if: needs.check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 21 (Zulu)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      - name: Download Morphe CLI and dh6k patches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/setup-tools.sh "${{ needs.check.outputs.patches_version }}" "tools"
+
+      - name: Upload Tools Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: morphe-tools
+          path: tools/
+          retention-days: 1
+          if-no-files-found: error
+
+  patch:
+    name: Patch Brave (${{ matrix.brave_variant }} - ${{ matrix.architecture }})
+    needs: [check, prepare]
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.check.outputs.matrix) }}
@@ -208,293 +130,38 @@ jobs:
           distribution: 'zulu'
           java-version: '21'
 
-      - name: Download Morphe CLI and dh6k patches
-        id: tools
+      - name: Download Tools Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: morphe-tools
+          path: tools
+
+      - name: Build and Sign Patched APKs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PATCHES_TAG: ${{ needs.check.outputs.patches_version }}
-        run: |
-          set -e
-          mkdir -p tools
-
-          echo "=========================================================="
-          echo "==> 1. Descargando Morphe CLI..."
-          echo "=========================================================="
-          gh release download --repo MorpheApp/morphe-cli --pattern "*all.jar" --dir tools 2>/dev/null || \
-          gh release download --repo MorpheApp/morphe-desktop --pattern "*all.jar" --dir tools
-          mv tools/*all.jar tools/cli.jar
-          chmod +x tools/cli.jar
-
-          echo "=========================================================="
-          echo "==> 2. Descargando bundle de parches dh6k/morphe-patches ($PATCHES_TAG)..."
-          echo "=========================================================="
-          if gh release download "$PATCHES_TAG" --repo dh6k/morphe-patches --pattern "*.mpp" --dir tools 2>/dev/null; then
-            mv tools/*.mpp tools/patches.jar
-          elif gh release download "$PATCHES_TAG" --repo dh6k/morphe-patches --pattern "*.jar" --dir tools 2>/dev/null; then
-            mv tools/*.jar tools/patches.jar
-          elif gh release download --repo dh6k/morphe-patches --pattern "*.mpp" --dir tools 2>/dev/null; then
-            mv tools/*.mpp tools/patches.jar
-          elif gh release download --repo dh6k/morphe-patches --pattern "*.jar" --dir tools 2>/dev/null; then
-            mv tools/*.jar tools/patches.jar
-          else
-            echo "Error: No se pudo obtener el bundle de parches de dh6k/morphe-patches" >&2
-            exit 1
-          fi
-
-          echo "=========================================================="
-          echo "==> 3. Verificando/descargando integrations APK..."
-          echo "=========================================================="
-          if gh release download "$PATCHES_TAG" --repo dh6k/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
-            mv tools/*.apk tools/integrations.apk
-            echo "Integrations APK descargado desde release $PATCHES_TAG."
-          elif gh release download --repo dh6k/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
-            mv tools/*.apk tools/integrations.apk
-            echo "Integrations APK descargado desde latest dh6k/morphe-patches."
-          elif gh release download --repo MorpheApp/morphe-patches --pattern "*.apk" --dir tools 2>/dev/null; then
-            mv tools/*.apk tools/integrations.apk
-            echo "Integrations APK descargado desde fallback MorpheApp/morphe-patches."
-          else
-            echo "Nota: Integraciones incluidas dentro del bundle de parches."
-          fi
-
-          ls -lh tools/
-
-      - name: Resolve and download Brave APK
-        id: brave
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRAVE_VARIANT: ${{ matrix.brave_variant }}
-          ARCH: ${{ matrix.architecture }}
-          APK_URL: ${{ matrix.apk_url }}
-        run: |
-          set -e
-
-          if [ -n "$APK_URL" ]; then
-            echo "=========================================================="
-            echo "==> Descargando APK desde URL directa provista:"
-            echo "    $APK_URL"
-            echo "=========================================================="
-            curl -fL -o input.apk "$APK_URL"
-            BRAVE_TAG="manual-url"
-          else
-            echo "=========================================================="
-            echo "==> Resolviendo release oficial de brave/brave-browser..."
-            echo "=========================================================="
-
-            case "$BRAVE_VARIANT" in
-              "Stable")
-                PREFIX="Release "
-                ;;
-              "Beta")
-                PREFIX="Beta "
-                ;;
-              "Nightly")
-                PREFIX="Nightly "
-                ;;
-              *)
-                echo "Error: Variante desconocida '$BRAVE_VARIANT'" >&2
-                exit 1
-                ;;
-            esac
-
-            echo "Buscando release con prefijo '$PREFIX' y paquetes APK..."
-            RELEASE_TAG=$(gh api "repos/brave/brave-browser/releases?per_page=30" | jq -r --arg prefix "$PREFIX" '
-              map(select((.name | startswith($prefix)) and (.assets | any(.name | endswith(".apk"))))) | first | .tag_name
-            ')
-
-            if [ -z "$RELEASE_TAG" ] || [ "$RELEASE_TAG" = "null" ]; then
-              echo "Error: No se encontró release con APKs para la variante '$BRAVE_VARIANT'" >&2
-              exit 1
-            fi
-
-            echo "Release seleccionada: $RELEASE_TAG"
-            BRAVE_TAG="$RELEASE_TAG"
-
-            ASSET_NAME=$(gh api "repos/brave/brave-browser/releases/tags/$RELEASE_TAG" | jq -r --arg arch "$ARCH" '
-              .assets | map(select(.name | endswith(".apk"))) as $apks |
-              (
-                if $arch == "armv8" then
-                  ($apks | map(select(.name | test("arm64.*universal|arm64"; "i"))) | first | .name)
-                elif $arch == "armv7" then
-                  ($apks | map(select((.name | test("monoarm|[0-9]-arm|arm"; "i")) and (.name | test("arm64"; "i") | not))) | first | .name)
-                elif $arch == "universal" then
-                  ($apks | map(select(.name | test("universal"; "i"))) | first | .name)
-                else
-                  empty
-                end
-              ) // ($apks | first | .name)
-            ')
-
-            if [ -z "$ASSET_NAME" ] || [ "$ASSET_NAME" = "null" ]; then
-              echo "Error: No se pudo resolver el nombre del activo para '$ARCH'" >&2
-              exit 1
-            fi
-
-            echo "Descargando '$ASSET_NAME' de la release '$RELEASE_TAG'..."
-            gh release download "$RELEASE_TAG" --repo brave/brave-browser --pattern "$ASSET_NAME" --output input.apk
-          fi
-
-          echo "brave_version=$BRAVE_TAG" >> "$GITHUB_OUTPUT"
-          ls -lh input.apk
-
-      - name: Inspect compatible patches
-        run: |
-          set -e
-          echo "=========================================================="
-          echo "==> Inspeccionando parches compatibles para com.brave.browser..."
-          echo "=========================================================="
-          java -jar tools/cli.jar list-patches --patches tools/patches.jar --filter-package com.brave.browser 2>/dev/null || \
-          java -jar tools/cli.jar list-patches --patches tools/patches.jar --filter-package-name com.brave.browser -x || \
-          java -jar tools/cli.jar list-patches --patches tools/patches.jar -f com.brave.browser || true
-
-      - name: Patch and Sign APK
-        env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
           KEYSTORE_ENTRY_PASSWORD: ${{ secrets.KEYSTORE_ENTRY_PASSWORD }}
-          BRAVE_VARIANT: ${{ matrix.brave_variant }}
-          ARCH: ${{ matrix.architecture }}
-          THEME: ${{ matrix.theme }}
         run: |
-          set -e
+          chmod +x tools/cli.jar
+          bash scripts/build-apk.sh \
+            "${{ matrix.brave_variant }}" \
+            "${{ matrix.architecture }}" \
+            "${{ matrix.brave_tag }}" \
+            "${{ matrix.theme_mode }}" \
+            "${{ matrix.apk_url }}"
 
-          if [ "$THEME" = "amoled" ]; then
-            OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-amoled-patched.apk"
-          else
-            OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-patched.apk"
-          fi
-
-          KEYSTORE_ARGS=()
-          if [ -n "${KEYSTORE_BASE64:-}" ]; then
-            echo "==> Configurando keystore personalizado desde secretos..."
-            mkdir -p certs
-            echo "$KEYSTORE_BASE64" | base64 -d > certs/signing.keystore
-            KEYSTORE_ARGS=(
-              --keystore certs/signing.keystore
-              --keystore-password "${KEYSTORE_PASSWORD:-}"
-              --keystore-entry-alias "${KEYSTORE_ALIAS:-}"
-              --keystore-entry-password "${KEYSTORE_ENTRY_PASSWORD:-${KEYSTORE_PASSWORD:-}}"
-            )
-          else
-            echo "==> No se detectó KEYSTORE_BASE64. Morphe CLI usará el keystore de depuración por defecto."
-          fi
-
-          MERGE_ARGS=()
-          if [ -f "tools/integrations.apk" ]; then
-            if java -jar tools/cli.jar patch --help 2>&1 | grep -q -- "--merge"; then
-              echo "CLI soporta opción --merge; adjuntando tools/integrations.apk..."
-              MERGE_ARGS=("--merge" "tools/integrations.apk")
-            else
-              echo "tools/integrations.apk disponible pero Morphe CLI empaqueta las integraciones internamente; omitiendo --merge."
-            fi
-          fi
-
-          WALLPAPER_FILE="assets/wallpaper.png"
-          if [ ! -f "$WALLPAPER_FILE" ]; then
-            mkdir -p assets
-            python3 -c "
-          import struct, zlib
-          w, h = 1920, 1080
-          row = b'\x00' + b'\x18\x1b\x20' * w
-          data = zlib.compress(row * h)
-          with open('assets/wallpaper.png', 'wb') as f:
-              f.write(b'\x89PNG\r\n\x1a\n')
-              ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)
-              f.write(struct.pack('>I', len(ihdr)) + b'IHDR' + ihdr + struct.pack('>I', zlib.crc32(b'IHDR' + ihdr)))
-              f.write(struct.pack('>I', len(data)) + b'IDAT' + data + struct.pack('>I', zlib.crc32(b'IDAT' + data)))
-              f.write(struct.pack('>I', 0) + b'IEND' + struct.pack('>I', zlib.crc32(b'IEND')))
-          "
-          fi
-
-          # Lista de parches base comunes
-          PATCH_ARGS=(
-            -e "Custom NTP wallpaper"
-            -O customWallpaper=assets/wallpaper.png
-            -e "Brave Origin"
-            -e "Brave Startup Performance Optimization"
-          )
-
-          # Evaluar compatibilidad de 'Brave NTP four-column tiles'
-          if java -jar tools/cli.jar list-patches --patches tools/patches.jar 2>/dev/null | grep -qi "four-column"; then
-            echo "==> Parche 'Brave NTP four-column tiles' detectado en el bundle; activando..."
-            PATCH_ARGS+=(-e "Brave NTP four-column tiles")
-          else
-            echo "==> Parche 'Brave NTP four-column tiles' no presente en este bundle; continuando."
-          fi
-
-          # Evaluar y aplicar 'Brave AMOLED theme' si corresponde
-          if [ "$THEME" = "amoled" ]; then
-            if java -jar tools/cli.jar list-patches --patches tools/patches.jar 2>/dev/null | grep -qi "AMOLED"; then
-              echo "==> Aplicando parche 'Brave AMOLED theme' (negro puro #000000)..."
-              PATCH_ARGS+=(
-                -e "Brave AMOLED theme"
-                -O backgroundColor="#000000"
-              )
-            else
-              echo "==> Advertencia: Variante AMOLED solicitada pero 'Brave AMOLED theme' no está disponible en este bundle."
-            fi
-          fi
-
-          echo "=========================================================="
-          echo "==> Ejecutando parcheo con Morphe CLI..."
-          echo "    Destino: $OUTPUT_APK"
-          echo "    Tema: $THEME"
-          echo "=========================================================="
-          java -jar tools/cli.jar patch \
-            --patches tools/patches.jar \
-            "${PATCH_ARGS[@]}" \
-            ${MERGE_ARGS[@]+"${MERGE_ARGS[@]}"} \
-            ${KEYSTORE_ARGS[@]+"${KEYSTORE_ARGS[@]}"} \
-            -o "$OUTPUT_APK" \
-            input.apk
-
-          rm -rf certs
-
-          echo "=========================================================="
-          echo "==> APK parcheado exitosamente: $OUTPUT_APK"
-          ls -lh "$OUTPUT_APK"
-          echo "=========================================================="
-
-      - name: Generate Checksum & Metadata
-        id: meta
-        env:
-          BRAVE_VARIANT: ${{ matrix.brave_variant }}
-          ARCH: ${{ matrix.architecture }}
-          THEME: ${{ matrix.theme }}
-          BRAVE_VERSION: ${{ steps.brave.outputs.brave_version }}
-        run: |
-          set -e
-          if [ "$THEME" = "amoled" ]; then
-            OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-amoled-patched.apk"
-          else
-            OUTPUT_APK="brave-${BRAVE_VARIANT}-${ARCH}-patched.apk"
-          fi
-
-          SHA256_HASH=$(sha256sum "$OUTPUT_APK" | awk '{print $1}')
-          echo "${SHA256_HASH}  ${OUTPUT_APK}" > "${OUTPUT_APK}.sha256"
-
-          cat <<EOF > "${OUTPUT_APK}.meta"
-          variant: ${BRAVE_VARIANT}
-          arch: ${ARCH}
-          theme: ${THEME}
-          brave_version: ${BRAVE_VERSION}
-          filename: ${OUTPUT_APK}
-          sha256: ${SHA256_HASH}
-          EOF
-
-          echo "output_apk=$OUTPUT_APK" >> "$GITHUB_OUTPUT"
-
-      - name: Upload APK Artifact
+      - name: Upload APKs and Metadata
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ matrix.brave_variant }}-${{ matrix.architecture }}-${{ matrix.theme }}
+          name: apks-${{ matrix.brave_variant }}-${{ matrix.architecture }}
           path: |
-            ${{ steps.meta.outputs.output_apk }}
-            ${{ steps.meta.outputs.output_apk }}.sha256
-            ${{ steps.meta.outputs.output_apk }}.meta
-          if-no-files-found: error
+            *.apk
+            *.sha256
+            metadata-*.json
           retention-days: 1
+          if-no-files-found: error
 
   release:
     name: Publish Unified Release
@@ -504,134 +171,32 @@ jobs:
       needs.check.outputs.should_run == 'true' &&
       (needs.patch.result == 'success' || needs.patch.result == 'failure')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
 
     steps:
-      - name: Checkout repository
+      - name: Checkout scripts and assets
         uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts
 
       - name: Download all APK artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
+          pattern: apks-*
           merge-multiple: true
 
-      - name: Build Unified Release Notes
-        id: notes
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          PATCHES_VERSION: ${{ needs.check.outputs.patches_version }}
-          BRAVE_VERSION: ${{ needs.check.outputs.brave_version }}
-        run: |
-          set -e
-
-          if ! compgen -G "release-assets/*.apk" > /dev/null; then
-            echo "Error: No se encontró ningún archivo APK descargado." >&2
-            exit 1
-          fi
-
-          BUILD_DATE=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
-
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            SIGNING_STATUS="Firmado con keystore personalizado (persistente)"
-          else
-            SIGNING_STATUS="Firmado con keystore de depuración (Morphe CLI predeterminado)"
-          fi
-
-          # Consolidar todos los hashes en un único archivo
-          cat release-assets/*.sha256 > release-assets/checksums.txt
-
-          {
-            echo "# Brave Browser Android (Morphe Patched)"
-            echo ""
-            echo "Compilaciones automatizadas de Brave Browser para Android parcheadas con parches de [dh6k/morphe-patches](https://github.com/dh6k/morphe-patches)."
-            echo ""
-            echo "## Información de la versión"
-            echo ""
-            echo "| Parámetro | Valor |"
-            echo "| :--- | :--- |"
-            echo "| **Versión base (Stable)** | \`${BRAVE_VERSION}\` |"
-            echo "| **Versión dh6k/morphe-patches** | \`${PATCHES_VERSION}\` |"
-            echo "| **Estado de firma** | ${SIGNING_STATUS} |"
-            echo "| **Fecha de compilación** | \`${BUILD_DATE}\` |"
-            echo ""
-            echo "## Paquetes APK disponibles"
-            echo ""
-            echo "| Variante | Arquitectura | Tema | Versión Base | Archivo APK |"
-            echo "| :--- | :--- | :--- | :--- | :--- |"
-
-            for meta in release-assets/*.meta; do
-              [ -f "$meta" ] || continue
-              VAR=$(grep '^[[:space:]]*variant:' "$meta" | head -n 1 | awk '{print $2}')
-              ARCH=$(grep '^[[:space:]]*arch:' "$meta" | head -n 1 | awk '{print $2}')
-              THM=$(grep '^[[:space:]]*theme:' "$meta" | head -n 1 | awk '{print $2}')
-              BVER=$(grep '^[[:space:]]*brave_version:' "$meta" | head -n 1 | awk '{print $2}')
-              FNAME=$(grep '^[[:space:]]*filename:' "$meta" | head -n 1 | awk '{print $2}')
-
-              THEME_LABEL="Estándar"
-              if [ "$THM" = "amoled" ]; then
-                THEME_LABEL="🖤 AMOLED"
-              fi
-
-              echo "| **${VAR}** | \`${ARCH}\` | ${THEME_LABEL} | \`${BVER}\` | \`${FNAME}\` |"
-            done
-
-            echo ""
-            echo "## Parches de Brave aplicados"
-            echo ""
-            echo "- **Brave Origin**: Desbloqueo de opciones de Brave Origin y controles avanzados de funciones."
-            echo "- **Brave Startup Performance Optimization**: Eliminación de comprobaciones y latencia OEM en el arranque."
-            echo "- **Custom NTP wallpaper**: Integración de fondo de pantalla personalizado en la Nueva Pestaña (NTP)."
-            echo "- **Brave NTP four-column tiles**: Mantiene las tarjetas de sitios frecuentes en cuadrícula de 4 columnas descendente incluso con fondo activado."
-            echo "- **Brave AMOLED theme** *(variantes AMOLED)*: Reescribe las superficies oscuras a negro puro OLED (\`#000000\`) y desactiva Material You dynamic colors."
-            echo ""
-            echo "## Integridad de los binarios (SHA-256)"
-            echo ""
-            echo '```text'
-            cat release-assets/checksums.txt
-            echo '```'
-          } > release_notes.md
-
-          echo "=========================================================="
-          echo "Release Notes unificadas generadas:"
-          echo "=========================================================="
-          cat release_notes.md
-
-      - name: Publish to GitHub Releases
+      - name: Publish Unified Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ needs.check.outputs.release_tag }}
-          RELEASE_TITLE: ${{ needs.check.outputs.release_title }}
-          PRERELEASE: ${{ needs.check.outputs.prerelease }}
         run: |
-          set -e
-          echo "=========================================================="
-          echo "==> Publicando release unificada en GitHub Releases"
-          echo "    Tag: $TAG_NAME"
-          echo "    Title: $RELEASE_TITLE"
-          echo "=========================================================="
-
-          PRERELEASE_FLAG=""
-          if [ "$PRERELEASE" = "true" ]; then
-            PRERELEASE_FLAG="--prerelease"
-          fi
-
-          FILES_TO_UPLOAD=( release-assets/*.apk release-assets/checksums.txt )
-
-          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            echo "La release '$TAG_NAME' ya existía. Actualizando notas y subiendo binarios con --clobber..."
-            gh release edit "$TAG_NAME" --title "$RELEASE_TITLE" --notes-file release_notes.md $PRERELEASE_FLAG || true
-            gh release upload "$TAG_NAME" "${FILES_TO_UPLOAD[@]}" --clobber
-          else
-            echo "Creando nueva release única '$TAG_NAME' con todos los APKs..."
-            gh release create "$TAG_NAME" "${FILES_TO_UPLOAD[@]}" \
-              --title "$RELEASE_TITLE" \
-              --notes-file release_notes.md \
-              --target "${GITHUB_REF_NAME:-main}" \
-              $PRERELEASE_FLAG
-          fi
-
-          echo "=========================================================="
-          echo "==> Publicación de release unificada completada con éxito."
-          echo "=========================================================="
+          bash scripts/publish-release.sh \
+            "release-assets" \
+            "${{ needs.check.outputs.release_tag }}" \
+            "${{ needs.check.outputs.release_title }}" \
+            "${{ needs.check.outputs.patches_version }}" \
+            "${{ needs.check.outputs.prerelease }}" \
+            "${{ needs.patch.result }}"
