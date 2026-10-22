@@ -131,7 +131,7 @@ jobs:
           java-version: '21'
 
       - name: Download Tools Artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: morphe-tools
           path: tools
@@ -183,7 +183,7 @@ jobs:
             scripts
 
       - name: Download all APK artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           pattern: apks-*
